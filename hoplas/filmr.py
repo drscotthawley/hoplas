@@ -96,12 +96,12 @@ class FiLMR2d(nn.Module):
                  ):
         super().__init__()
         self.gamma =  nn.Parameter(torch.ones((1)))
-        self.beta =  beta_init_fac*nn.Parameter(torch.randn((1)))
+        self.beta = nn.Parameter(beta_init_fac * torch.randn((1)))
         self.theta = theta_init_fac*nn.Parameter( torch.ones((1)) )
 
     def forward(self, x):
         rot = get_rot_2d(self.theta)
-        return (x * self.gamma + self.beta) @ rot
+        return (x * self.gamma + self.beta) @ rot.to(x.device)
 
 
 def get_rot_nd(u, v, debug=False, eye=None):
@@ -116,14 +116,14 @@ class FiLMR(nn.Module):
                  ):
         super().__init__()
         self.gamma =  nn.Parameter(torch.ones((1)))
-        self.beta =  beta_init_fac*nn.Parameter(torch.randn((1)))
+        self.beta = nn.Parameter(beta_init_fac * torch.randn((1)))
         self.u = nn.Parameter( torch.randn((nd)) )
         self.v = nn.Parameter( self.u + uv_diff_fac*torch.randn((nd)) )
         self.register_buffer('eye', torch.eye(nd))
 
     def forward(self, x, debug=False):
         rot = get_rot_nd(self.u, self.v, debug=debug, eye=self.eye)
-        return (x * self.gamma + self.beta) @ rot
+        return (x * self.gamma + self.beta) @ rot.to(x.device)
 
 
 ####---- Baseline: Square Matrix Multiply
