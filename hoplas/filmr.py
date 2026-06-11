@@ -124,3 +124,27 @@ class FiLMR(nn.Module):
     def forward(self, x, debug=False):
         rot = get_rot_nd(self.u, self.v, debug=debug, eye=self.eye)
         return (x * self.gamma + self.beta) @ rot
+
+
+####---- Baseline: Square Matrix Multiply
+
+class MatOp(nn.Module):
+    "just a square matrix operation"
+    def __init__(self, nd=2):
+        super().__init__()
+        self.mat = 0.1*nn.Parameter(torch.randn((nd,nd)))
+        
+    def forward(self, x):
+        x = self.mat.to(x.device).T @ x.T
+        x = x.T @ self.mat.to(x.device)
+        return x
+
+
+class MatOp2(nn.Module):
+    "square matrix op applied once (x @ mat): cleaner equivalent if mat² was unintentional"
+    def __init__(self, nd=2):
+        super().__init__()
+        self.mat = 0.1*nn.Parameter(torch.randn((nd,nd)))
+
+    def forward(self, x):
+        return x @ self.mat
