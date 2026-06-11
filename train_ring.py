@@ -75,6 +75,7 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=args.lr_patience, min_lr=args.lr / 1000)
     sim_fn = nn.MSELoss()
+    sim_ema = None  # smoothed sim for the scheduler (sigreg flattens, so don't anneal on total)
 
     try:
         for epoch in range(1, args.epochs + 1):
@@ -99,11 +100,12 @@ def train(args):
             avg_loss = total_loss / len(dataset)
             avg_sim = total_sim / len(dataset)
             avg_sigreg = total_sigreg / len(dataset)
-            scheduler.step(avg_sim)  # plateau on sim, not total (sigreg flattens by design)
+            sim_ema = avg_sim if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg_sim
+            scheduler.step(sim_ema)  # anneal on smoothed sim, not total (sigreg flattens by design)
             print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.6f}  sim={avg_sim:.6f}  sigreg={avg_sigreg:.6f}")
             if wandb.run is not None:
                 log = {"epoch": epoch, "loss": avg_loss, "lr": optimizer.param_groups[0]["lr"],
-                       "sim_loss": avg_sim, "sigreg_loss": avg_sigreg}
+                       "sim_loss": avg_sim, "sim_ema": sim_ema, "sigreg_loss": avg_sigreg}
                 log["embedding"] = embedding_scatter3d(  # last batch's projections
                     xproj, yproj, xproj_t, epoch, args.op, args.order)
                 wandb.log(log)
@@ -119,7 +121,7 @@ def main():
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
     p.add_argument("--epochs", type=int, default=1000)
-    p.add_argument("--lr", type=float, default=0.003)
+    p.add_argument("--lr", type=float, default=0.001)
     p.add_argument("--lr-patience", type=int, default=10, help="ReduceLROnPlateau patience (epochs)")
     p.add_argument("--lambd", type=float, default=0.01,
                    help="SIGReg weight: loss = (1-lambd)*sim + lambd*sigreg")
@@ -137,6 +139,8 @@ def main():
     p.add_argument("--proj-resid", action="store_true",
                    help="Global nd->nd skip in Projector (learn perturbation of identity)")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--sim-ema", type=float, default=0.8,
+                   help="EMA decay for smoothing sim before the LR scheduler")
     p.add_argument("--tag", type=str, default="", help="tag to append to wandb run name")
     p.add_argument("--weight-decay", type=float, default=1e-4,
                    help="Weight decay on >=2D weights (helps FiLMR_expm precision drift)")
