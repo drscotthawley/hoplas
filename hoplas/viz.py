@@ -59,11 +59,11 @@ def embedding_scatter3d(yproj, xproj_t, epoch, method, order=None,
     for name, symbol, color in _SERIES_STYLE:
         p = proj[name]
         lab = labels[name]
-        text = [str(int(v)) for v in lab] if lab is not None else None
+        hovertext = [f"{name} #{int(v)}" for v in lab] if lab is not None else None
         fig.add_trace(go.Scatter3d(
             x=p[:, 0], y=p[:, 1], z=p[:, 2],
-            mode="markers+text" if text is not None else "markers", name=name,
-            text=text, textposition="top center", textfont=dict(size=8, color=color),
+            mode="markers", name=name,
+            hovertext=hovertext, hoverinfo="text" if hovertext is not None else None,
             marker=dict(size=3.5, symbol=symbol, color=color, opacity=0.75),
         ))
 
