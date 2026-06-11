@@ -127,26 +127,32 @@ class FiLMR(nn.Module):
 
 
 class FiLMR_expm(nn.Module):
-    """FiLM + rotation via a skew-symmetric generator and matrix exponential.
+    """FiLM + rotation via a low-rank skew-symmetric generator and matrix exp.
 
-    R = expm(W - W.T) is guaranteed special-orthogonal (a proper rotation in
-    SO(nd)) for any W, and the gradient w.r.t. W is well-conditioned everywhere
-    -- no arctan2 plateau near identity. Unlike FiLMR this is a general nd
-    rotation, not constrained to a single plane, but it can represent the
-    single-plane target just as well.
+    The generator is built from k = rank//2 vector pairs (u_i, v_i):
+        A = sum_i (u_i v_i^T - v_i u_i^T) = U^T V - V^T U   (skew, rank <= rank)
+        R = expm(A)                                          (always in SO(nd))
+    so `rank` caps how many independent rotation *planes* R can use:
+      rank=2  -> a single-plane rotation (the right prior for the ring task),
+      rank=nd -> recovers a general SO(nd) rotation.
+    Gradients are well-conditioned everywhere (no arctan2 plateau near identity).
     """
-    def __init__(self, nd=3,
+    def __init__(self, nd=3, rank=2,
                  beta_init_fac = 0.001,   # tiny beta is maybe cheating
-                 w_init_fac = 0.01,       # small W => R starts near identity
+                 w_init_fac = 0.01,       # small generator => R starts near identity
                  ):
         super().__init__()
+        assert rank % 2 == 0, f"rank must be even, got {rank}"
+        assert rank <= nd, f"rank ({rank}) cannot exceed nd ({nd})"
+        k = rank // 2                          # number of rotation planes
         self.gamma = nn.Parameter(torch.ones((1)))
         self.beta = nn.Parameter(beta_init_fac * torch.randn((1)))
-        self.W = nn.Parameter(w_init_fac * torch.randn((nd, nd)))
+        self.U = nn.Parameter(w_init_fac * torch.randn((k, nd)))
+        self.V = nn.Parameter(w_init_fac * torch.randn((k, nd)))
 
     def forward(self, x):
-        A = self.W - self.W.T            # skew-symmetric generator
-        rot = torch.matrix_exp(A)        # always in SO(nd)
+        A = self.U.T @ self.V - self.V.T @ self.U   # rank-<=2k skew generator
+        rot = torch.matrix_exp(A)                   # always in SO(nd)
         return (x * self.gamma + self.beta) @ rot
 
 

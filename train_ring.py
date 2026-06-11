@@ -20,13 +20,13 @@ class build_op(nn.Module):
     """Builds the transform op, optionally as a residual x + op(x).
     op_resid centers the transform at identity (good for many ring points;
     redundant for filmr_expm, already near-identity via matrix_exp)."""
-    def __init__(self, method: str, nd: int, order: int, op_resid: bool = False):
+    def __init__(self, method: str, nd: int, order: int, op_resid: bool = False, rank: int = 2):
         super().__init__()
         self.op_resid = op_resid
         if method == "filmr":
             self.op = FiLMR(nd=nd)
         elif method == "filmr_expm":
-            self.op = FiLMR_expm(nd=nd)
+            self.op = FiLMR_expm(nd=nd, rank=rank)
         elif method == "matop":
             self.op = MatOp(nd=nd)
         elif method == "matop2":
@@ -56,7 +56,7 @@ def train(args):
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
     proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid).to(device)
-    trans_op = build_op(args.op, args.nd, args.order, args.op_resid).to(device)
+    trans_op = build_op(args.op, args.nd, args.order, args.op_resid, args.rank).to(device)
 
     n_proj = sum(p.numel() for p in proj.parameters() if p.requires_grad)
     n_op = sum(p.numel() for p in trans_op.parameters() if p.requires_grad)
@@ -138,6 +138,8 @@ def main():
     p.add_argument("--proj-layers", type=int, default=3, help="Projector number of layers")
     p.add_argument("--proj-resid", action="store_true",
                    help="Global nd->nd skip in Projector (learn perturbation of identity)")
+    p.add_argument("--rank", type=int, default=2,
+                   help="Rotation-plane rank for filmr_expm generator (even, <=nd; 2=single plane)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--sim-ema", type=float, default=0.8,
                    help="EMA decay for smoothing sim before the LR scheduler")
