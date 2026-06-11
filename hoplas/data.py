@@ -35,7 +35,7 @@ class LineDataset(Dataset):
         j = (i + 1) % self.npoints     # next, roll/wrap at the end
         inp[0] += self.line_vals[i]
         tgt[0] += self.line_vals[j]
-        return inp, tgt
+        return {'data': inp, 'label': i}, {'data': tgt, 'label': j}
 
 
 

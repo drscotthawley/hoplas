@@ -88,18 +88,18 @@ def train(args):
             total_sigreg = 0.0
             pbar = tqdm(loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
             for x, y in pbar:
-                x, y = x.to(device), y.to(device)
+                xb, yb = x['data'].to(device), y['data'].to(device)
                 optimizer.zero_grad()
-                xproj, yproj = proj(x), proj(y)  # project into new space
-                xproj_t = trans_op(xproj)        # transform/rotate
+                xproj, yproj = proj(xb), proj(yb)  # project into new space
+                xproj_t = trans_op(xproj)          # transform/rotate
                 sim_loss = sim_fn(xproj_t, yproj) # pull toward next one in sequence
                 sigreg_loss = SIGReg( torch.cat([xproj_t, yproj], dim=0), global_step=epoch )  # pull distribution toward Gaussian
                 loss = (1 - args.lambd) * sim_loss + args.lambd * sigreg_loss
                 loss.backward()
                 optimizer.step()
-                total_loss += loss.item() * x.size(0)
-                total_sim += sim_loss.item() * x.size(0)
-                total_sigreg += sigreg_loss.item() * x.size(0)
+                total_loss += loss.item() * xb.size(0)
+                total_sim += sim_loss.item() * xb.size(0)
+                total_sigreg += sigreg_loss.item() * xb.size(0)
                 pbar.set_postfix(loss=f"{loss.item():.6f}")
             avg_loss = total_loss / len(dataset)
             avg_sim = total_sim / len(dataset)
@@ -111,7 +111,8 @@ def train(args):
                 log = {"epoch": epoch, "loss": avg_loss, "lr": optimizer.param_groups[0]["lr"],
                        "sim_loss": avg_sim, "sim_ema": sim_ema, "sigreg_loss": avg_sigreg}
                 log["embedding"] = embedding_scatter3d(  # last batch's projections
-                    xproj, yproj, xproj_t, epoch, args.op, args.order)
+                    yproj, xproj_t, epoch, args.op, args.order,
+                    yproj_labels=y['label'], xproj_t_labels=x['label'])
                 wandb.log(log)
     except KeyboardInterrupt:
         print("\ninterrupted — finishing run")

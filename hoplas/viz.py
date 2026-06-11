@@ -7,7 +7,6 @@ import wandb
 
 # (label, plotly 3d marker symbol, color)  -- symbols limited for Scatter3d
 _SERIES_STYLE = [
-    ("xproj",   "circle",  "#1f77b4"),  # blue circles
     ("yproj",   "square",  "#ff7f0e"),  # orange squares
     ("xproj_t", "diamond", "#2ca02c"),  # green diamonds
 ]
@@ -17,25 +16,31 @@ def _to_np(t):
     return t.detach().cpu().float().numpy()
 
 
-def embedding_scatter3d(xproj, yproj, xproj_t, epoch, method, order=None,
+def embedding_scatter3d(yproj, xproj_t, epoch, method, order=None,
+                        yproj_labels=None, xproj_t_labels=None,
                         max_points=300, seed=0):
-    """Return a wandb.Html of a 3D PCA scatter of the three series.
+    """Return a wandb.Html of a 3D PCA scatter of yproj and xproj_t.
 
-    The three (B, nd) tensors are subsampled to the same rows, then projected
-    to 3D with a single shared PCA so they're directly comparable. Log it with
-    e.g. wandb.log({"embedding": embedding_scatter3d(...)}).
+    The two (B, nd) tensors are subsampled to the same rows, then projected
+    to 3D with a single shared PCA so they're directly comparable. Optional
+    per-point labels (ring indices) are rendered as text next to each marker.
+    Log it with e.g. wandb.log({"embedding": embedding_scatter3d(...)}).
     """
     data = {
-        "xproj": _to_np(xproj),
         "yproj": _to_np(yproj),
         "xproj_t": _to_np(xproj_t),
     }
+    labels = {
+        "yproj": _to_np(yproj_labels) if yproj_labels is not None else None,
+        "xproj_t": _to_np(xproj_t_labels) if xproj_t_labels is not None else None,
+    }
 
-    # subsample the same row indices across all three series
+    # subsample the same row indices across both series
     n_avail = min(a.shape[0] for a in data.values())
     n = min(max_points, n_avail)
     idx = np.random.default_rng(seed).choice(n_avail, size=n, replace=False)
     data = {k: a[idx] for k, a in data.items()}
+    labels = {k: (v[idx] if v is not None else None) for k, v in labels.items()}
 
     nd = next(iter(data.values())).shape[1]
     if nd == 3:
@@ -43,7 +48,7 @@ def embedding_scatter3d(xproj, yproj, xproj_t, epoch, method, order=None,
         proj = data
         axis_titles = ("dim0", "dim1", "dim2")
     else:
-        # shared PCA to 3D, fit on all three series together
+        # shared PCA to 3D, fit on both series together
         stacked = np.concatenate(list(data.values()), axis=0)
         mean = stacked.mean(axis=0, keepdims=True)
         comps = np.linalg.svd(stacked - mean, full_matrices=False)[2][:3]  # (3, nd)
@@ -51,11 +56,14 @@ def embedding_scatter3d(xproj, yproj, xproj_t, epoch, method, order=None,
         axis_titles = ("PC1", "PC2", "PC3")
 
     fig = go.Figure()
-    for label, symbol, color in _SERIES_STYLE:
-        p = proj[label]
+    for name, symbol, color in _SERIES_STYLE:
+        p = proj[name]
+        lab = labels[name]
+        text = [str(int(v)) for v in lab] if lab is not None else None
         fig.add_trace(go.Scatter3d(
             x=p[:, 0], y=p[:, 1], z=p[:, 2],
-            mode="markers", name=label,
+            mode="markers+text" if text is not None else "markers", name=name,
+            text=text, textposition="top center", textfont=dict(size=8, color=color),
             marker=dict(size=3.5, symbol=symbol, color=color, opacity=0.75),
         ))
 
