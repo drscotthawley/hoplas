@@ -63,7 +63,7 @@ def embedding_scatter3d(yproj, xproj_t, epoch, method, order=None,
         fig.add_trace(go.Scatter3d(
             x=p[:, 0], y=p[:, 1], z=p[:, 2],
             mode="markers", name=name,
-            hovertext=hovertext, hoverinfo="text" if hovertext is not None else None,
+            hovertext=hovertext,  # shown alongside default x/y/z in hover
             marker=dict(size=3.5, symbol=symbol, color=color, opacity=0.75),
         ))
 
