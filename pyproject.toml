@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hoplas"
+version = "0.0.1"
+description = "hypercomplex operational latent spaces"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Scott H. Hawley", email = "scott.hawley@belmont.edu" }]
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "numpy",
+    "einops",
+    "tqdm",
+    "wandb",
+    "matplotlib",
+    "vicregaddon",
+    "jupyter",
+    "pandas",
+    "plotly",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+[project.urls]
+Repository = "https://github.com/drscotthawley/hoplas"
