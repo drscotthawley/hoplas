@@ -112,7 +112,7 @@ class FiLMR(nn.Module):
     "affine transformation plus rotation, in nd"
     def __init__(self, nd=3,
                  beta_init_fac = 0.0001, # tiny beta is maybe cheating
-                 uv_diff_fac = 0.25, # difference scale between initial u and v
+                 uv_diff_fac = 3.0, # difference scale between initial u and v
                  ):
         super().__init__()
         self.gamma =  nn.Parameter(torch.ones((1)))
@@ -124,6 +124,30 @@ class FiLMR(nn.Module):
     def forward(self, x, debug=False):
         rot = get_rot_nd(self.u, self.v, debug=debug, eye=self.eye)
         return (x * self.gamma + self.beta) @ rot.to(x.device)
+
+
+class FiLMR_expm(nn.Module):
+    """FiLM + rotation via a skew-symmetric generator and matrix exponential.
+
+    R = expm(W - W.T) is guaranteed special-orthogonal (a proper rotation in
+    SO(nd)) for any W, and the gradient w.r.t. W is well-conditioned everywhere
+    -- no arctan2 plateau near identity. Unlike FiLMR this is a general nd
+    rotation, not constrained to a single plane, but it can represent the
+    single-plane target just as well.
+    """
+    def __init__(self, nd=3,
+                 beta_init_fac = 0.001,   # tiny beta is maybe cheating
+                 w_init_fac = 0.01,       # small W => R starts near identity
+                 ):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones((1)))
+        self.beta = nn.Parameter(beta_init_fac * torch.randn((1)))
+        self.W = nn.Parameter(w_init_fac * torch.randn((nd, nd)))
+
+    def forward(self, x):
+        A = self.W - self.W.T            # skew-symmetric generator
+        rot = torch.matrix_exp(A)        # always in SO(nd)
+        return (x * self.gamma + self.beta) @ rot
 
 
 ####---- Baseline: Square Matrix Multiply
