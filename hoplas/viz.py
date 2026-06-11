@@ -37,11 +37,18 @@ def embedding_scatter3d(xproj, yproj, xproj_t, epoch, method, order=None,
     idx = np.random.default_rng(seed).choice(n_avail, size=n, replace=False)
     data = {k: a[idx] for k, a in data.items()}
 
-    # shared PCA to 3D, fit on all three series together
-    stacked = np.concatenate(list(data.values()), axis=0)
-    mean = stacked.mean(axis=0, keepdims=True)
-    comps = np.linalg.svd(stacked - mean, full_matrices=False)[2][:3]  # (3, nd)
-    proj = {k: (a - mean) @ comps.T for k, a in data.items()}          # (n, 3)
+    nd = next(iter(data.values())).shape[1]
+    if nd == 3:
+        # already 3D -- plot raw coords, no PCA
+        proj = data
+        axis_titles = ("dim0", "dim1", "dim2")
+    else:
+        # shared PCA to 3D, fit on all three series together
+        stacked = np.concatenate(list(data.values()), axis=0)
+        mean = stacked.mean(axis=0, keepdims=True)
+        comps = np.linalg.svd(stacked - mean, full_matrices=False)[2][:3]  # (3, nd)
+        proj = {k: (a - mean) @ comps.T for k, a in data.items()}          # (n, 3)
+        axis_titles = ("PC1", "PC2", "PC3")
 
     fig = go.Figure()
     for label, symbol, color in _SERIES_STYLE:
@@ -59,7 +66,7 @@ def embedding_scatter3d(xproj, yproj, xproj_t, epoch, method, order=None,
         title=title,
         showlegend=True,
         legend=dict(itemsizing="constant"),
-        scene=dict(xaxis_title="PC1", yaxis_title="PC2", zaxis_title="PC3"),
+        scene=dict(xaxis_title=axis_titles[0], yaxis_title=axis_titles[1], zaxis_title=axis_titles[2]),
         margin=dict(l=0, r=0, t=40, b=0),
     )
     return wandb.Html(fig.to_html(full_html=True, include_plotlyjs="cdn"))

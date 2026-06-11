@@ -17,18 +17,16 @@ class LineDataset(Dataset):
         with the target being the next point on the line (+ optional noise), 
         with a 'wrap around' boundary condition on the end. 
     """
-    def __init__(self, nd=3, npoints=12, noise=0.00, debug=True):
+    def __init__(self, nd=3, npoints=12, noise=0.00, debug=True, len=60_000):
         super().__init__()
-        self.nd = nd
-        self.npoints = npoints
-        self.noise = noise
+        self.nd, self.npoints, self.noise, self.len = nd, npoints, noise, len
         self.line_vals = torch.linspace(-1.0, 1.0, npoints) # points in a line 
         if debug:
             print(f"LineDataset: nd={nd}  npoints={npoints}  noise={noise}")
             print(f"line_vals: {self.line_vals}")
 
     def __len__(self): # a big to constitute and "epoch"
-        return 40_000
+        return self.len
     
     def __getitem__(self, idx):
         inp = self.noise * torch.randn(self.nd)
