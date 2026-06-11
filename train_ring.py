@@ -72,52 +72,55 @@ def train(args):
         optimizer, mode="min", factor=0.5, patience=args.lr_patience, min_lr=args.lr / 500)
     sim_fn = nn.MSELoss()
 
-    for epoch in range(1, args.epochs + 1):
-        total_loss = 0.0
-        total_sim = 0.0
-        total_sigreg = 0.0
-        pbar = tqdm(loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
-        for x, y in pbar:
-            x, y = x.to(device), y.to(device)
-            optimizer.zero_grad()
-            xproj, yproj = proj(x), proj(y)  # project into new space
-            xproj_t = trans_op(xproj)        # transform/rotate
-            sim_loss = sim_fn(xproj_t, yproj) # pull toward next one in sequence
-            sigreg_loss = SIGReg( torch.cat([xproj_t, yproj], dim=0), global_step=epoch )  # pull distribution toward Gaussian
-            loss = (1 - args.lambd) * sim_loss + args.lambd * sigreg_loss
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item() * x.size(0)
-            total_sim += sim_loss.item() * x.size(0)
-            total_sigreg += sigreg_loss.item() * x.size(0)
-            pbar.set_postfix(loss=f"{loss.item():.6f}")
-        avg_loss = total_loss / len(dataset)
-        avg_sim = total_sim / len(dataset)
-        avg_sigreg = total_sigreg / len(dataset)
-        scheduler.step(avg_loss)
-        print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.6f}  sim={avg_sim:.6f}  sigreg={avg_sigreg:.6f}")
+    try:
+        for epoch in range(1, args.epochs + 1):
+            total_loss = 0.0
+            total_sim = 0.0
+            total_sigreg = 0.0
+            pbar = tqdm(loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
+            for x, y in pbar:
+                x, y = x.to(device), y.to(device)
+                optimizer.zero_grad()
+                xproj, yproj = proj(x), proj(y)  # project into new space
+                xproj_t = trans_op(xproj)        # transform/rotate
+                sim_loss = sim_fn(xproj_t, yproj) # pull toward next one in sequence
+                sigreg_loss = SIGReg( torch.cat([xproj_t, yproj], dim=0), global_step=epoch )  # pull distribution toward Gaussian
+                loss = (1 - args.lambd) * sim_loss + args.lambd * sigreg_loss
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item() * x.size(0)
+                total_sim += sim_loss.item() * x.size(0)
+                total_sigreg += sigreg_loss.item() * x.size(0)
+                pbar.set_postfix(loss=f"{loss.item():.6f}")
+            avg_loss = total_loss / len(dataset)
+            avg_sim = total_sim / len(dataset)
+            avg_sigreg = total_sigreg / len(dataset)
+            scheduler.step(avg_loss)
+            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.6f}  sim={avg_sim:.6f}  sigreg={avg_sigreg:.6f}")
+            if wandb.run is not None:
+                log = {"epoch": epoch, "loss": avg_loss, "lr": optimizer.param_groups[0]["lr"],
+                       "sim_loss": avg_sim, "sigreg_loss": avg_sigreg}
+                log["embedding"] = embedding_scatter3d(  # last batch's projections
+                    xproj, yproj, xproj_t, epoch, args.method, args.order)
+                wandb.log(log)
+    except KeyboardInterrupt:
+        print("\ninterrupted — finishing run")
+    finally:
         if wandb.run is not None:
-            log = {"epoch": epoch, "loss": avg_loss, "lr": optimizer.param_groups[0]["lr"],
-                   "sim_loss": avg_sim, "sigreg_loss": avg_sigreg}
-            log["embedding"] = embedding_scatter3d(  # last batch's projections
-                xproj, yproj, xproj_t, epoch, args.method, args.order)
-            wandb.log(log)
-
-    if wandb.run is not None:
-        wandb.finish()
+            wandb.finish()
 
 
 def main():
     p = argparse.ArgumentParser(description="Ring task with different model variants.")
-    p.add_argument("--method", choices=["filmr", "filmr_expm", "matop", "matop2", "ph"], default="filmr")
+    p.add_argument("--method", choices=["filmr", "filmr_expm", "matop", "matop2", "ph"], default="filmr_expm")
     p.add_argument("--nd", type=int, default=3, help="Dimension of the space")
     p.add_argument("--n-hid", type=int, default=32, help="Projector hidden dim")
     p.add_argument("--proj-layers", type=int, default=3, help="Projector number of layers")
     p.add_argument("--npoints", type=int, default=12, help="Number of quantized points on the line")
     p.add_argument("--noise", type=float, default=0.01, help="Jitter added to each point")
     p.add_argument("--batch-size", type=int, default=2048)
-    p.add_argument("--epochs", type=int, default=100)
-    p.add_argument("--lr", type=float, default=0.01)
+    p.add_argument("--epochs", type=int, default=1000)
+    p.add_argument("--lr", type=float, default=0.003)
     p.add_argument("--lr-patience", type=int, default=10,
                    help="ReduceLROnPlateau patience (epochs)")
     p.add_argument("--weight-decay", type=float, default=1e-4,
@@ -131,7 +134,7 @@ def main():
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--proj-resid", action="store_true",
                    help="Global nd->nd skip in Projector (learn perturbation of identity)")
-    p.add_argument("--op-resid", action="store_true",
+    p.add_argument("--op-resid", action=argparse.BooleanOptionalAction, default=True,
                    help="Wrap trans_op as x + op(x) (centers transform at identity; good for many ring points)")
     p.add_argument("--tag", type=str, default="", help="tag to append to wandb run name")
 
