@@ -66,7 +66,8 @@ def embedding_scatter3d(xproj, yproj, xproj_t, epoch, method, order=None,
         title=title,
         showlegend=True,
         legend=dict(itemsizing="constant"),
-        scene=dict(xaxis_title=axis_titles[0], yaxis_title=axis_titles[1], zaxis_title=axis_titles[2]),
+        scene=dict(xaxis_title=axis_titles[0], yaxis_title=axis_titles[1], zaxis_title=axis_titles[2],
+                   aspectmode="data"),  # equal distance scale on every axis (no per-axis zoom)
         margin=dict(l=0, r=0, t=40, b=0),
     )
     return wandb.Html(fig.to_html(full_html=True, include_plotlyjs="cdn"))
