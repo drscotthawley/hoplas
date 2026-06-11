@@ -99,7 +99,7 @@ def train(args):
             avg_loss = total_loss / len(dataset)
             avg_sim = total_sim / len(dataset)
             avg_sigreg = total_sigreg / len(dataset)
-            scheduler.step(avg_loss)
+            scheduler.step(avg_sim)  # plateau on sim, not total (sigreg flattens by design)
             print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.6f}  sim={avg_sim:.6f}  sigreg={avg_sigreg:.6f}")
             if wandb.run is not None:
                 log = {"epoch": epoch, "loss": avg_loss, "lr": optimizer.param_groups[0]["lr"],
