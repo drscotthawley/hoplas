@@ -88,7 +88,7 @@ def main():
     p.add_argument("--nd", type=int, default=64, help="Dimension of the space")
     p.add_argument("--n-samples", type=int, default=40_000)
     p.add_argument("--batch-size", type=int, default=2048)
-    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--lr", type=float, default=1e-2)
     p.add_argument("--order", type=int, default=4,
                    help="Hypercomplex order n for PHMLinear (nd must be divisible by order)")
