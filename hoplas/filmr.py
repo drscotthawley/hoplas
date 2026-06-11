@@ -97,7 +97,7 @@ class FiLMR2d(nn.Module):
         super().__init__()
         self.gamma =  nn.Parameter(torch.ones((1)))
         self.beta = nn.Parameter(beta_init_fac * torch.randn((1)))
-        self.theta = theta_init_fac*nn.Parameter( torch.ones((1)) )
+        self.theta = nn.Parameter( theta_init_fac * torch.ones((1)) )
 
     def forward(self, x):
         rot = get_rot_2d(self.theta)
@@ -156,7 +156,7 @@ class MatOp(nn.Module):
     "just a square matrix operation"
     def __init__(self, nd=2):
         super().__init__()
-        self.mat = 0.1*nn.Parameter(torch.randn((nd,nd)))
+        self.mat = nn.Parameter(0.1 * torch.randn((nd,nd)))
         
     def forward(self, x):
         x = self.mat.to(x.device).T @ x.T
@@ -168,7 +168,7 @@ class MatOp2(nn.Module):
     "square matrix op applied once (x @ mat): cleaner equivalent if mat² was unintentional"
     def __init__(self, nd=2):
         super().__init__()
-        self.mat = 0.1*nn.Parameter(torch.randn((nd,nd)))
+        self.mat = nn.Parameter(0.1 * torch.randn((nd,nd)))
 
     def forward(self, x):
         return x @ self.mat
