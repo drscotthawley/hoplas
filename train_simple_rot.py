@@ -60,7 +60,15 @@ def train(args):
     loader = DataLoader(TensorDataset(x, y), batch_size=args.batch_size, shuffle=True)
 
     model = build_model(args.method, args.nd, args.order).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # weight-decay only on >=2D weights (e.g. FiLMR_expm.W); never on gamma/beta/bias.
+    # For expm this pulls W toward the minimal-angle generator, keeping matrix_exp
+    # accurate and preventing the slow precision drift after convergence.
+    decay = [p for p in model.parameters() if p.ndim >= 2]
+    no_decay = [p for p in model.parameters() if p.ndim < 2]
+    optimizer = torch.optim.AdamW([
+        {"params": decay, "weight_decay": args.weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ], lr=args.lr)
     criterion = nn.MSELoss()
 
     for epoch in range(1, args.epochs + 1):
@@ -90,6 +98,8 @@ def main():
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--lr", type=float, default=1e-2)
+    p.add_argument("--weight-decay", type=float, default=1e-4,
+                   help="Weight decay on >=2D weights (helps FiLMR_expm precision drift)")
     p.add_argument("--order", type=int, default=4,
                    help="Hypercomplex order n for PHMLinear (nd must be divisible by order)")
     p.add_argument("--corr", type=float, default=0.9,
