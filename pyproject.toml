@@ -19,6 +19,7 @@ dependencies = [
     "vicregaddon",
     "jupyter",
     "pandas",
+    "open_clip_torch",
     "plotly",
 ]
 
