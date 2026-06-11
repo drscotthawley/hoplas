@@ -6,6 +6,7 @@ import torch
 import wandb
 from tqdm import tqdm
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from hoplas.filmr import FiLMR, FiLMR_expm, MatOp, MatOp2
@@ -20,9 +21,11 @@ class build_op(nn.Module):
     """Builds the transform op, optionally as a residual x + op(x).
     op_resid centers the transform at identity (good for many ring points;
     redundant for filmr_expm, already near-identity via matrix_exp)."""
-    def __init__(self, method: str, nd: int, order: int, op_resid: bool = False, rank: int = 2):
+    def __init__(self, method: str, nd: int, order: int, op_resid: bool = False, rank: int = 2,
+                 unit_norm: bool = True):
         super().__init__()
         self.op_resid = op_resid
+        self.unit_norm = unit_norm    # L2-normalize output onto unit sphere (matches projector)
         if method == "filmr":
             self.op = FiLMR(nd=nd)
         elif method == "filmr_expm":
@@ -39,7 +42,8 @@ class build_op(nn.Module):
             raise ValueError(f"Unknown method: {method}")
 
     def forward(self, x):
-        return x + self.op(x) if self.op_resid else self.op(x)
+        out = x + self.op(x) if self.op_resid else self.op(x)
+        return F.normalize(out, dim=-1) if self.unit_norm else out
 
 
 def train(args):
@@ -56,7 +60,7 @@ def train(args):
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
     proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=args.unit_norm).to(device)
-    trans_op = build_op(args.op, args.nd, args.order, args.op_resid, args.rank).to(device)
+    trans_op = build_op(args.op, args.nd, args.order, args.op_resid, args.rank, args.unit_norm).to(device)
 
     n_proj = sum(p.numel() for p in proj.parameters() if p.requires_grad)
     n_op = sum(p.numel() for p in trans_op.parameters() if p.requires_grad)
