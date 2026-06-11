@@ -83,7 +83,7 @@ class PHMLinear(nn.Module):
   def forward(self, input):
     self.weight = torch.sum(self.kronecker_product1(self.a, self.s), dim=0)
 #     self.weight = self.kronecker_product2()
-    input = input.type(dtype=self.weight.type())
+    input = input.to(dtype=self.weight.dtype)
     return F.linear(input, weight=self.weight, bias=self.bias)
 
   def extra_repr(self) -> str:
@@ -146,7 +146,7 @@ class PHConv2d(Module):
     if self.cuda:
         self.weight = self.weight.cuda()
 
-    input = input.type(dtype=self.weight.type())
+    input = input.to(dtype=self.weight.dtype)
         
     return F.conv2d(input, weight=self.weight, stride=self.stride, padding=self.padding)
 
@@ -212,7 +212,7 @@ class PHConv1D(Module):
     if self.cuda:
         self.weight = self.weight.cuda()
 
-    input = input.type(dtype=self.weight.type())
+    input = input.to(dtype=self.weight.dtype)
     return F.conv1d(input, weight=self.weight, stride=self.stride, padding=self.padding,dilation=self.dilation)
     
     def extra_repr(self) -> str:
@@ -278,7 +278,7 @@ class PHConv3D(Module):
 #     if self.cuda:
 #         self.weight = self.weight.cuda()
 
-    input = input.type(dtype=self.weight.type())
+    input = input.to(dtype=self.weight.dtype)
     return F.conv3d(input, weight=self.weight, stride=self.stride, padding=self.padding,dilation=self.dilation)    
   
     def extra_repr(self) -> str:
