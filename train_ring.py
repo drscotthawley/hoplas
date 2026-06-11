@@ -55,7 +55,7 @@ def train(args):
     dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
-    proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid).to(device)
+    proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=args.unit_norm).to(device)
     trans_op = build_op(args.op, args.nd, args.order, args.op_resid, args.rank).to(device)
 
     n_proj = sum(p.numel() for p in proj.parameters() if p.requires_grad)
@@ -144,6 +144,8 @@ def main():
     p.add_argument("--sim-ema", type=float, default=0.8,
                    help="EMA decay for smoothing sim before the LR scheduler")
     p.add_argument("--tag", type=str, default="", help="tag to append to wandb run name")
+    p.add_argument("--unit-norm", action=argparse.BooleanOptionalAction, default=True,
+                   help="L2-normalize projector output onto the unit sphere")
     p.add_argument("--weight-decay", type=float, default=1e-4,
                    help="Weight decay on >=2D weights (helps FiLMR_expm precision drift)")
     main_args = p.parse_args()

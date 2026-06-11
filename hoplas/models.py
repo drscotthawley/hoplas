@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _norm(kind, dim):
@@ -25,10 +26,11 @@ class Projector(nn.Module):
     Input (nd->n_hid) and output (n_hid->nd) layers change dims so they're plain;
     the middle n_hid->n_hid layers use residual skips.
     """
-    def __init__(self, nd=64, n_hid=32, n_layers=3, norm="none", proj_resid=False):  # norm in {none,batch,layer}
+    def __init__(self, nd=64, n_hid=32, n_layers=3, norm="none", proj_resid=False, unit_norm=True):  # norm in {none,batch,layer}
         super().__init__()
         assert n_layers >= 2, "need at least an input and output layer"
         self.proj_resid = proj_resid  # global nd->nd skip: learn a perturbation of identity
+        self.unit_norm = unit_norm    # L2-normalize output onto the unit sphere
         self.in_proj = nn.Linear(nd, n_hid)
         self.in_norm = _norm(norm, n_hid)
         self.act = nn.GELU()
@@ -41,4 +43,5 @@ class Projector(nn.Module):
         for block in self.blocks:
             z = block(z)
         z = self.out_proj(z)
-        return y + z if self.proj_resid else z
+        z = y + z if self.proj_resid else z
+        return F.normalize(z, dim=-1) if self.unit_norm else z
