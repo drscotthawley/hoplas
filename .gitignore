@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# hoplas: downloaded third-party code, model weights, and datasets
+third_party/
+*.safetensors
+/data/
+mnist_latents.pt

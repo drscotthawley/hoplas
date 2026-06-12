@@ -38,6 +38,44 @@ class LineDataset(Dataset):
         return {'data': inp, 'label': i}, {'data': tgt, 'label': j}
 
 
+class MNISTEncodingsDataset(Dataset):
+    """Pairs of precomputed MNIST VAE encodings: (digit i, digit i+1), wrap 9->0.
+
+    Drop-in replacement for LineDataset: returns the same
+    ({'data', 'label'}, {'data', 'label'}) pair, where the target is a *random*
+    encoding of the next digit class (so each step is "advance to the next digit
+    cluster"). The .pt file (from scripts/encode_mnist.py) is small, so the whole
+    split is held in memory.
+    """
+    def __init__(self, pt_path="~/datasets/mnist_latents.pt", split="train", debug=True):
+        super().__init__()
+        assert split in ("train", "test"), f"split must be 'train' or 'test', got {split}"
+        pt_path = os.path.expanduser(pt_path)
+        if not os.path.exists(pt_path):
+            raise FileNotFoundError(f"{pt_path} not found -- run scripts/encode_mnist.py first")
+        blob = torch.load(pt_path, map_location="cpu")
+        self.z = blob[f"{split}_z"].float()           # (N, nd)
+        self.labels = blob[f"{split}_labels"].long()  # (N,)
+        self.nd = self.z.shape[1]
+        self.n_classes = int(self.labels.max().item()) + 1
+        # indices grouped by class, for sampling the "next digit"
+        self.class_indices = [torch.nonzero(self.labels == c, as_tuple=False).flatten()
+                              for c in range(self.n_classes)]
+        if debug:
+            print(f"MNISTEncodingsDataset: split={split}  N={len(self.z)}  nd={self.nd}  n_classes={self.n_classes}")
+
+    def __len__(self):
+        return len(self.z)
+
+    def __getitem__(self, idx):
+        i = int(self.labels[idx])
+        j = (i + 1) % self.n_classes              # next digit, wrap 9->0
+        pool = self.class_indices[j]
+        tgt_idx = pool[torch.randint(len(pool), (1,)).item()]  # random sample of class j
+        return ({'data': self.z[idx], 'label': i},
+                {'data': self.z[tgt_idx], 'label': j})
+
+
 
 class EmbeddingsDatasetWithLabels(Dataset):
     """Loads precomputed CLIP embeddings (vision + class-text) from .npz shards.
