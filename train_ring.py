@@ -61,15 +61,18 @@ def train(args):
 
     proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=args.unit_norm).to(device)
     trans_op = build_op(args.op, args.nd, args.order, args.op_resid, args.rank, args.unit_norm).to(device)
+    # inverse projector: maps embedding back to original space (unit_norm=False: output isn't on the sphere)
+    inv_proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, unit_norm=False).to(device)
 
     n_proj = sum(p.numel() for p in proj.parameters() if p.requires_grad)
     n_op = sum(p.numel() for p in trans_op.parameters() if p.requires_grad)
-    print(f"trainable params: projector={n_proj}  trans_op={n_op}")
-    
+    n_inv = sum(p.numel() for p in inv_proj.parameters() if p.requires_grad)
+    print(f"trainable params: projector={n_proj}  trans_op={n_op}  inv_proj={n_inv}")
+
     # weight-decay only on >=2D weights (proj Linears, FiLMR_expm.W); never on
     # gamma/beta/bias/norms. For expm this also pulls W toward the minimal-angle
     # generator, keeping matrix_exp accurate and preventing slow precision drift.
-    params = list(proj.parameters()) + list(trans_op.parameters())
+    params = list(proj.parameters()) + list(trans_op.parameters()) + list(inv_proj.parameters())
     decay = [p for p in params if p.ndim >= 2]
     no_decay = [p for p in params if p.ndim < 2]
     optimizer = torch.optim.AdamW([
@@ -86,30 +89,36 @@ def train(args):
             total_loss = 0.0
             total_sim = 0.0
             total_sigreg = 0.0
+            total_recon = 0.0
             pbar = tqdm(loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
             for x, y in pbar:
                 xb, yb = x['data'].to(device), y['data'].to(device)
                 optimizer.zero_grad()
                 xproj, yproj = proj(xb), proj(yb)  # project into new space
                 xproj_t = trans_op(xproj)          # transform/rotate
+                xprime = inv_proj(xproj)           # reconstruct original from embedding
                 sim_loss = sim_fn(xproj_t, yproj) # pull toward next one in sequence
                 sigreg_loss = SIGReg( torch.cat([xproj_t, yproj], dim=0), global_step=epoch )  # pull distribution toward Gaussian
-                loss = (1 - args.lambd) * sim_loss + args.lambd * sigreg_loss
+                recon_loss = sim_fn(xprime, xb)   # autoencoder: inv_proj(proj(x)) ~ x
+                loss = (1 - args.lambd) * sim_loss + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item() * xb.size(0)
                 total_sim += sim_loss.item() * xb.size(0)
                 total_sigreg += sigreg_loss.item() * xb.size(0)
+                total_recon += recon_loss.item() * xb.size(0)
                 pbar.set_postfix(loss=f"{loss.item():.6f}")
             avg_loss = total_loss / len(dataset)
             avg_sim = total_sim / len(dataset)
             avg_sigreg = total_sigreg / len(dataset)
+            avg_recon = total_recon / len(dataset)
             sim_ema = avg_sim if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg_sim
             scheduler.step(sim_ema)  # anneal on smoothed sim, not total (sigreg flattens by design)
-            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.6f}  sim={avg_sim:.6f}  sigreg={avg_sigreg:.6f}")
+            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.6f}  sim={avg_sim:.6f}  sigreg={avg_sigreg:.6f}  recon={avg_recon:.6f}")
             if wandb.run is not None:
                 log = {"epoch": epoch, "loss": avg_loss, "lr": optimizer.param_groups[0]["lr"],
-                       "sim_loss": avg_sim, "sim_ema": sim_ema, "sigreg_loss": avg_sigreg}
+                       "sim_loss": avg_sim, "sim_ema": sim_ema, "sigreg_loss": avg_sigreg,
+                       "recon_loss": avg_recon}
                 log["embedding"] = embedding_scatter3d(  # last batch's projections
                     yproj, xproj_t, epoch, args.op, args.order,
                     yproj_labels=y['label'], xproj_t_labels=x['label'])
@@ -130,6 +139,8 @@ def main():
     p.add_argument("--lr-patience", type=int, default=10, help="ReduceLROnPlateau patience (epochs)")
     p.add_argument("--lambd", type=float, default=0.01,
                    help="SIGReg weight: loss = (1-lambd)*sim + lambd*sigreg")
+    p.add_argument("--lambda-recon", type=float, default=1.0,
+                   help="Weight on inv_proj autoencoder reconstruction loss (0 disables)")
     p.add_argument("--n-hid", type=int, default=32, help="Projector hidden dim")
     p.add_argument("--nd", type=int, default=3, help="Dimension of the space")
     p.add_argument("--npoints", type=int, default=12, help="Number of quantized points on the line")
