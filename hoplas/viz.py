@@ -5,11 +5,17 @@ import plotly.graph_objects as go
 import wandb
 
 
+# Custom colorscales with NO shared endpoint: a blue ramp and an orange ramp,
+# both truncated so the light end is a tinted color (not white) and the dark end
+# is saturated -- so the two series never collide on either end. Colorblind-safe.
+_BLUE_SCALE = [[0.0, "#9ecae1"], [0.5, "#4292c6"], [1.0, "#084594"]]   # light blue -> navy
+_ORANGE_SCALE = [[0.0, "#fdae6b"], [0.5, "#f16913"], [1.0, "#8c2d04"]]  # light orange -> dark orange
+
 # (series, plotly 3d marker symbol, colorscale)  -- points colored by digit label;
 # symbols (limited set for Scatter3d) distinguish the two series.
 _SERIES_STYLE = [
-    ("yproj",   "square",  "Viridis"),
-    ("xproj_t", "diamond", "Plasma"),
+    ("yproj",   "square",  _BLUE_SCALE),
+    ("xproj_t", "diamond", _ORANGE_SCALE),
 ]
 
 
