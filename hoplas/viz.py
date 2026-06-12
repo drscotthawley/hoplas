@@ -62,13 +62,16 @@ def embedding_scatter3d(yproj, xproj_t, epoch, method, order=None,
     cmax = max(float(v.max()) for v in present) if present else 1.0
 
     fig = go.Figure()
-    for name, symbol, cmap in _SERIES_STYLE:
+    for i, (name, symbol, cmap) in enumerate(_SERIES_STYLE):
         p = proj[name]
         lab = labels[name]
         hovertext = [f"{name} #{int(v)}" for v in lab] if lab is not None else None
         if lab is not None:
             marker = dict(size=3.5, symbol=symbol, opacity=0.8,
-                          color=lab, colorscale=cmap, cmin=cmin, cmax=cmax, showscale=False)
+                          color=lab, colorscale=cmap, cmin=cmin, cmax=cmax,
+                          showscale=True,  # one colorbar per series, offset so they don't overlap
+                          colorbar=dict(title=dict(text=name, side="right"),
+                                        x=1.02 + 0.14 * i, thickness=14, len=0.75))
         else:
             marker = dict(size=3.5, symbol=symbol, opacity=0.8, color="gray")
         fig.add_trace(go.Scatter3d(
@@ -87,6 +90,6 @@ def embedding_scatter3d(yproj, xproj_t, epoch, method, order=None,
         legend=dict(itemsizing="constant"),
         scene=dict(xaxis_title=axis_titles[0], yaxis_title=axis_titles[1], zaxis_title=axis_titles[2],
                    aspectmode="data"),  # equal distance scale on every axis (no per-axis zoom)
-        margin=dict(l=0, r=0, t=40, b=0),
+        margin=dict(l=0, r=110, t=40, b=0),  # right room for the two colorbars
     )
     return wandb.Html(fig.to_html(full_html=True, include_plotlyjs="cdn"))
