@@ -5,10 +5,11 @@ import plotly.graph_objects as go
 import wandb
 
 
-# (label, plotly 3d marker symbol, color)  -- symbols limited for Scatter3d
+# (series, plotly 3d marker symbol, colorscale)  -- points colored by digit label;
+# symbols (limited set for Scatter3d) distinguish the two series.
 _SERIES_STYLE = [
-    ("yproj",   "square",  "#ff7f0e"),  # orange squares
-    ("xproj_t", "diamond", "#2ca02c"),  # green diamonds
+    ("yproj",   "square",  "Viridis"),
+    ("xproj_t", "diamond", "Plasma"),
 ]
 
 
@@ -55,16 +56,26 @@ def embedding_scatter3d(yproj, xproj_t, epoch, method, order=None,
         proj = {k: (a - mean) @ comps.T for k, a in data.items()}          # (n, 3)
         axis_titles = ("PC1", "PC2", "PC3")
 
+    # shared label range so both colormaps span the same digits (measured, not hard-coded)
+    present = [v for v in labels.values() if v is not None]
+    cmin = min(float(v.min()) for v in present) if present else 0.0
+    cmax = max(float(v.max()) for v in present) if present else 1.0
+
     fig = go.Figure()
-    for name, symbol, color in _SERIES_STYLE:
+    for name, symbol, cmap in _SERIES_STYLE:
         p = proj[name]
         lab = labels[name]
         hovertext = [f"{name} #{int(v)}" for v in lab] if lab is not None else None
+        if lab is not None:
+            marker = dict(size=3.5, symbol=symbol, opacity=0.8,
+                          color=lab, colorscale=cmap, cmin=cmin, cmax=cmax, showscale=False)
+        else:
+            marker = dict(size=3.5, symbol=symbol, opacity=0.8, color="gray")
         fig.add_trace(go.Scatter3d(
             x=p[:, 0], y=p[:, 1], z=p[:, 2],
             mode="markers", name=name,
             hovertext=hovertext,  # shown alongside default x/y/z in hover
-            marker=dict(size=3.5, symbol=symbol, color=color, opacity=0.75),
+            marker=marker,
         ))
 
     title = f"epoch {epoch} — {method}"

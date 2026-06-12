@@ -177,7 +177,7 @@ def main():
                    help="line=synthetic ring; mnist=VAE encodings (nd forced to 16)")
     p.add_argument("--epochs", type=int, default=1000)
     p.add_argument("--lr", type=float, default=0.001)
-    p.add_argument("--lr-patience", type=int, default=10, help="ReduceLROnPlateau patience (epochs)")
+    p.add_argument("--lr-patience", type=int, default=20, help="ReduceLROnPlateau patience (epochs)")
     p.add_argument("--lambd", type=float, default=0.01,
                    help="SIGReg weight: loss = (1-lambd)*sim + lambd*sigreg")
     p.add_argument("--lambda-recon", type=float, default=1.0,
