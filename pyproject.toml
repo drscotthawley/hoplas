@@ -12,6 +12,7 @@ authors = [{ name = "Scott H. Hawley", email = "scott.hawley@belmont.edu" }]
 requires-python = ">=3.10"
 dependencies = [
     "torch",
+    "torchvision",
     "numpy",
     "tqdm",
     "wandb",
@@ -21,6 +22,8 @@ dependencies = [
     "pandas",
     "open_clip_torch",
     "plotly",
+    "safetensors",
+    "gdown==5.2.0",
 ]
 
 [project.optional-dependencies]
