@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from hoplas.filmr import FiLMR, FiLMR_expm, MatOp, MatOp2
 from hoplas.ph_layers import PHMLinear
-from hoplas.data import LineDataset
+from hoplas.data import LineDataset, MNISTEncodingsDataset
 from hoplas.models import Projector
 from hoplas.losses import SIGReg
 from hoplas.viz import embedding_scatter3d
@@ -46,18 +46,47 @@ class build_op(nn.Module):
         return F.normalize(out, dim=-1) if self.unit_norm else out
 
 
+@torch.no_grad()
+def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args):
+    """Run the same losses over a held-out loader (no grad) for generalization metrics."""
+    proj.eval(); trans_op.eval(); inv_proj.eval()
+    n = tot_loss = tot_sim = tot_sigreg = tot_recon = 0.0
+    for x, y in loader:
+        xb, yb = x['data'].to(device), y['data'].to(device)
+        xproj, yproj = proj(xb), proj(yb)
+        xproj_t = trans_op(xproj)
+        xprime = inv_proj(xproj)
+        sim = sim_fn(xproj_t, yproj)
+        sigreg = SIGReg(torch.cat([xproj_t, yproj], dim=0), global_step=epoch)
+        recon = sim_fn(xprime, xb)
+        loss = (1 - args.lambd) * sim + args.lambd * sigreg + args.lambda_recon * recon
+        bs = xb.size(0)
+        tot_loss += loss.item() * bs; tot_sim += sim.item() * bs
+        tot_sigreg += sigreg.item() * bs; tot_recon += recon.item() * bs; n += bs
+    proj.train(); trans_op.train(); inv_proj.train()
+    return tot_loss / n, tot_sim / n, tot_sigreg / n, tot_recon / n
+
+
 def train(args):
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu") if not args.cpu else torch.device("cpu")
-    print(f"device={device}  op={args.op}  nd={args.nd}")
+    if args.dataset == "line":
+        dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise)
+        val_dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, debug=False, len=5000)
+    else:  # mnist: the encodings dictate nd (overrides --nd)
+        dataset = MNISTEncodingsDataset(split="train")
+        val_dataset = MNISTEncodingsDataset(split="test", debug=False)
+        args.nd = dataset.nd
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    print(f"device={device}  op={args.op}  dataset={args.dataset}  nd={args.nd}")
 
     run_name = f"{args.op}_{args.order}" if args.op == "ph" else args.op
+    run_name = f"{args.dataset}_{run_name}"
     run_name = f"{run_name}_{args.tag}" if args.tag else run_name
+    project = "ring" if args.dataset == "line" else f"ring-{args.dataset}"
     if not args.no_wandb:
-        wandb.init(project="ring", name=run_name, config=vars(args))
-
-    dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise)
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+        wandb.init(project=project, name=run_name, config=vars(args))
 
     proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=args.unit_norm).to(device)
     trans_op = build_op(args.op, args.nd, args.order, args.op_resid, args.rank, args.unit_norm).to(device)
@@ -115,10 +144,20 @@ def train(args):
             sim_ema = avg_sim if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg_sim
             scheduler.step(sim_ema)  # anneal on smoothed sim, not total (sigreg flattens by design)
             print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.6f}  sim={avg_sim:.6f}  sigreg={avg_sigreg:.6f}  recon={avg_recon:.6f}")
+
+            do_val = args.val_every and (epoch % args.val_every == 0 or epoch == 1)
+            if do_val:
+                val_loss, val_sim, val_sigreg, val_recon = evaluate(
+                    val_loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args)
+                print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}")
+
             if wandb.run is not None:
                 log = {"epoch": epoch, "loss": avg_loss, "lr": optimizer.param_groups[0]["lr"],
                        "sim_loss": avg_sim, "sim_ema": sim_ema, "sigreg_loss": avg_sigreg,
                        "recon_loss": avg_recon}
+                if do_val:
+                    log.update({"val_loss": val_loss, "val_sim_loss": val_sim,
+                                "val_sigreg_loss": val_sigreg, "val_recon_loss": val_recon})
                 log["embedding"] = embedding_scatter3d(  # last batch's projections
                     yproj, xproj_t, epoch, args.op, args.order,
                     yproj_labels=y['label'], xproj_t_labels=x['label'])
@@ -134,6 +173,8 @@ def main():
     p = argparse.ArgumentParser(description="Ring task with different model variants.")
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
+    p.add_argument("--dataset", choices=["line", "mnist"], default="line",
+                   help="line=synthetic ring; mnist=VAE encodings (nd forced to 16)")
     p.add_argument("--epochs", type=int, default=1000)
     p.add_argument("--lr", type=float, default=0.001)
     p.add_argument("--lr-patience", type=int, default=10, help="ReduceLROnPlateau patience (epochs)")
@@ -162,6 +203,8 @@ def main():
     p.add_argument("--tag", type=str, default="", help="tag to append to wandb run name")
     p.add_argument("--unit-norm", action=argparse.BooleanOptionalAction, default=True,
                    help="L2-normalize projector output onto the unit sphere")
+    p.add_argument("--val-every", type=int, default=5,
+                   help="Evaluate on held-out split every N epochs (0 disables)")
     p.add_argument("--weight-decay", type=float, default=1e-4,
                    help="Weight decay on >=2D weights (helps FiLMR_expm precision drift)")
     main_args = p.parse_args()
