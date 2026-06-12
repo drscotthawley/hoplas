@@ -143,7 +143,9 @@ def train(args):
             avg_recon = total_recon / len(dataset)
             sim_ema = avg_sim if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg_sim
             scheduler.step(sim_ema)  # anneal on smoothed sim, not total (sigreg flattens by design)
-            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.6f}  sim={avg_sim:.6f}  sigreg={avg_sigreg:.6f}  recon={avg_recon:.6f}")
+            op_angle = trans_op.op.rotation_angle_deg() if args.op == "filmr_expm" else None
+            angle_str = f"  angle={op_angle:.2f}deg" if op_angle is not None else ""
+            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.6f}  sim={avg_sim:.6f}  sigreg={avg_sigreg:.6f}  recon={avg_recon:.6f}{angle_str}")
 
             do_val = args.val_every and (epoch % args.val_every == 0 or epoch == 1)
             if do_val:
@@ -158,6 +160,8 @@ def train(args):
                 if do_val:
                     log.update({"val_loss": val_loss, "val_sim_loss": val_sim,
                                 "val_sigreg_loss": val_sigreg, "val_recon_loss": val_recon})
+                if op_angle is not None:
+                    log["op_angle_deg"] = op_angle
                 log["embedding"] = embedding_scatter3d(  # last batch's projections
                     yproj, xproj_t, epoch, args.op, args.order,
                     yproj_labels=y['label'], xproj_t_labels=x['label'])

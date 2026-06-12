@@ -155,6 +155,18 @@ class FiLMR_expm(nn.Module):
         rot = torch.matrix_exp(A)                   # always in SO(nd)
         return (x * self.gamma + self.beta) @ rot
 
+    @torch.no_grad()
+    def rotation_angle_deg(self):
+        """Total rotation angle (degrees) of the generator.
+
+        For a single plane (rank=2) this is the exact rotation angle: the skew
+        generator A has eigenvalues +-i*theta, and ||A||_F = sqrt(2)*theta.
+        For higher rank it returns sqrt(sum of per-plane angles^2).
+        """
+        A = self.U.T @ self.V - self.V.T @ self.U
+        theta = A.norm() / (2 ** 0.5)               # radians
+        return float(theta * 180.0 / torch.pi)
+
 
 ####---- Baseline: Square Matrix Multiply
 
