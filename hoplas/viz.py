@@ -18,7 +18,7 @@ def _to_np(t):
 
 def embedding_scatter3d(yproj, xproj_t, epoch, method, order=None,
                         yproj_labels=None, xproj_t_labels=None,
-                        max_points=300, seed=0):
+                        max_points=1000, seed=0):
     """Return a wandb.Html of a 3D PCA scatter of yproj and xproj_t.
 
     The two (B, nd) tensors are subsampled to the same rows, then projected
