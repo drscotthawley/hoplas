@@ -100,7 +100,7 @@ def train(args):
 
     os.makedirs("checkpoints", exist_ok=True)
     ckpt_path = os.path.join("checkpoints", f"{run_name}.pt")
-    best_val = float("inf")  # save the checkpoint with the lowest val loss
+    best_val = float("inf")  # tracks best val_sim (sigreg is ~constant, sim is the real quality signal)
 
     try:
         for epoch in range(1, args.epochs + 1):
@@ -135,9 +135,9 @@ def train(args):
                     val_loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args,
                     max_viz=args.max_viz_points)
                 print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}")
-                if val_loss < best_val:
-                    best_val = val_loss
-                    torch.save({"epoch": epoch, "val_loss": val_loss, "args": vars(args),
+                if val_sim < best_val:
+                    best_val = val_sim
+                    torch.save({"epoch": epoch, "val_sim_loss": val_sim, "args": vars(args),
                                 "proj": proj.state_dict(), "inv_proj": inv_proj.state_dict(),
                                 "trans_op": trans_op.state_dict()}, ckpt_path)
 

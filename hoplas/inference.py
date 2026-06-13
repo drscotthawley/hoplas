@@ -39,7 +39,7 @@ def load_for_inference(ckpt_path, device=None):
     inv_proj = Projector(nd=a["nd"], n_hid=a["n_hid"], n_layers=a["proj_layers"], unit_norm=False)
     inv_proj.load_state_dict(ck["inv_proj"])
     for m in (proj, trans_op, inv_proj): m.to(device).eval()
-    print(f"loaded checkpoint: epoch={ck['epoch']}  val_loss={ck['val_loss']:.6f}  op={a['op']}  nd={a['nd']}")
+    print(f"loaded checkpoint: epoch={ck['epoch']}  val_sim_loss={ck['val_sim_loss']:.6f}  op={a['op']}  nd={a['nd']}")
     return proj, trans_op, inv_proj, device
 
 
