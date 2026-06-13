@@ -18,10 +18,12 @@ from hoplas.viz import embedding_scatter3d
 
 
 @torch.no_grad()
-def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args):
-    """Run the same losses over a held-out loader (no grad) for generalization metrics."""
+def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_viz=0):
+    """Run the same losses over a held-out loader (no grad) for generalization metrics.
+    If max_viz > 0, also accumulates up to max_viz projected points for visualization."""
     proj.eval(); trans_op.eval(); inv_proj.eval()
     n = tot_loss = tot_sim = tot_sigreg = tot_recon = 0.0
+    viz_y, viz_xt, viz_yl, viz_xl, viz_n = [], [], [], [], 0
     for x, y in loader:
         xb, yb = x['data'].to(device), y['data'].to(device)
         xproj, yproj = proj(xb), proj(yb)
@@ -34,8 +36,14 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args):
         bs = xb.size(0)
         tot_loss += loss.item() * bs; tot_sim += sim.item() * bs
         tot_sigreg += sigreg.item() * bs; tot_recon += recon.item() * bs; n += bs
+        if max_viz > 0 and viz_n < max_viz:
+            viz_y.append(yproj); viz_xt.append(xproj_t)
+            viz_yl.append(y['label']); viz_xl.append(x['label'])
+            viz_n += bs
     proj.train(); trans_op.train(); inv_proj.train()
-    return tot_loss / n, tot_sim / n, tot_sigreg / n, tot_recon / n
+    losses = (tot_loss / n, tot_sim / n, tot_sigreg / n, tot_recon / n)
+    viz = (torch.cat(viz_y), torch.cat(viz_xt), torch.cat(viz_yl), torch.cat(viz_xl)) if viz_y else None
+    return losses, viz
 
 
 def train(args):
@@ -123,8 +131,9 @@ def train(args):
 
             do_val = args.val_every and (epoch % args.val_every == 0 or epoch == 1)
             if do_val:
-                val_loss, val_sim, val_sigreg, val_recon = evaluate(
-                    val_loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args)
+                (val_loss, val_sim, val_sigreg, val_recon), viz = evaluate(
+                    val_loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args,
+                    max_viz=args.max_viz_points)
                 print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}")
                 if val_loss < best_val:
                     best_val = val_loss
@@ -136,14 +145,17 @@ def train(args):
                 log = {"epoch": epoch, "loss": avg["loss"], "lr": optimizer.param_groups[0]["lr"],
                        "sim_loss": avg["sim"], "sim_ema": sim_ema, "sigreg_loss": avg["sigreg"],
                        "recon_loss": avg["recon"]}
+                if op_angle is not None:
+                    log["op_angle_deg"] = op_angle
                 if do_val:
                     log.update({"val_loss": val_loss, "val_sim_loss": val_sim,
                                 "val_sigreg_loss": val_sigreg, "val_recon_loss": val_recon})
-                if op_angle is not None:
-                    log["op_angle_deg"] = op_angle
-                log["embedding"] = embedding_scatter3d(  # last batch's projections
-                    yproj, xproj_t, epoch, args.op, args.order,
-                    yproj_labels=y['label'], xproj_t_labels=x['label'])
+                    if viz is not None:
+                        vy, vxt, vyl, vxl = viz
+                        log["embedding"] = embedding_scatter3d(
+                            vy, vxt, epoch, args.op, args.order,
+                            yproj_labels=vyl, xproj_t_labels=vxl,
+                            max_points=args.max_viz_points)
                 wandb.log(log)
     except KeyboardInterrupt:
         print("\ninterrupted — finishing run")
@@ -189,7 +201,9 @@ def main():
     p.add_argument("--tag", type=str, default="", help="tag to append to wandb run name")
     p.add_argument("--unit-norm", action=argparse.BooleanOptionalAction, default=True,
                    help="L2-normalize projector output onto the unit sphere")
-    p.add_argument("--val-every", type=int, default=5,
+    p.add_argument("--max-viz-points", type=int, default=1000,
+                   help="Max points to accumulate per epoch for the W&B embedding scatter")
+    p.add_argument("--val-every", type=int, default=1,
                    help="Evaluate on held-out split every N epochs (0 disables)")
     p.add_argument("--weight-decay", type=float, default=1e-4,
                    help="Weight decay on >=2D weights (helps FiLMR_expm precision drift)")
