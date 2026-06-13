@@ -80,3 +80,107 @@ def load_mnist_vae(device=None):
     vae.load_state_dict(load_file(_VAE_WEIGHTS_PATH))
     device = device or _pick_device()
     return vae.to(device).eval()
+
+
+# ─── CIFAR-10 β-VAE ───────────────────────────────────────────────────────────
+
+import torch
+import torch.nn as nn
+
+CIFAR_LATENT_DIM = 128
+_CIFAR_VAE_SPEC = dict(latent_dim=128, base_channels=128, image_size=32, in_channels=3, num_groups=32, attn_heads=4)
+_CIFAR_WEIGHTS_PATH = os.path.join(WEIGHTS_DIR, "cifar_vae.pt")
+
+
+class _ResBlock2d(nn.Module):
+    """Pre-activation residual block: (GN→SiLU→Conv)×2, last conv zero-init → starts as identity."""
+    def __init__(self, channels, num_groups=32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.GroupNorm(num_groups, channels), nn.SiLU(), nn.Conv2d(channels, channels, 3, padding=1),
+            nn.GroupNorm(num_groups, channels), nn.SiLU(), nn.Conv2d(channels, channels, 3, padding=1),
+        )
+        nn.init.zeros_(self.net[-1].weight); nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, x): return x + self.net(x)
+
+
+class _SelfAttn2d(nn.Module):
+    """Multi-head self-attention over H×W spatial tokens."""
+    def __init__(self, channels, num_heads=4, num_groups=32):
+        super().__init__()
+        self.norm = nn.GroupNorm(num_groups, channels)
+        self.attn = nn.MultiheadAttention(channels, num_heads, batch_first=True)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        h = self.norm(x).reshape(B, C, H*W).permute(0, 2, 1)
+        h, _ = self.attn(h, h, h)
+        return x + h.permute(0, 2, 1).reshape(B, C, H, W)
+
+
+class _CIFAREncoder(nn.Module):
+    def __init__(self, in_ch, C, latent_dim, G, heads, sp):
+        super().__init__()
+        self.stem  = nn.Conv2d(in_ch, C, 3, padding=1)
+        self.down1 = nn.Sequential(_ResBlock2d(C, G),   nn.Conv2d(C,   2*C, 3, stride=2, padding=1))
+        self.down2 = nn.Sequential(_ResBlock2d(2*C, G), nn.Conv2d(2*C, 2*C, 3, stride=2, padding=1))
+        self.mid   = nn.Sequential(_ResBlock2d(2*C, G), _SelfAttn2d(2*C, heads, G), _ResBlock2d(2*C, G))
+        self.head  = nn.Linear(2*C * sp * sp, 2 * latent_dim)
+
+    def forward(self, x):
+        h = self.mid(self.down2(self.down1(self.stem(x))))
+        mu, logvar = self.head(h.flatten(1)).chunk(2, dim=-1)
+        return mu, logvar
+
+
+class _CIFARDecoder(nn.Module):
+    def __init__(self, out_ch, C, latent_dim, G, heads, sp):
+        super().__init__()
+        self.C, self.sp = C, sp
+        self.in_proj = nn.Linear(latent_dim, 2*C * sp * sp)
+        self.mid  = nn.Sequential(_ResBlock2d(2*C, G), _SelfAttn2d(2*C, heads, G), _ResBlock2d(2*C, G))
+        self.up1  = nn.Sequential(nn.Upsample(scale_factor=2, mode='nearest'),
+                                  nn.Conv2d(2*C, 2*C, 3, padding=1), _ResBlock2d(2*C, G))
+        self.up2  = nn.Sequential(nn.Upsample(scale_factor=2, mode='nearest'),
+                                  nn.Conv2d(2*C, C, 3, padding=1),   _ResBlock2d(C, G))
+        self.out  = nn.Sequential(nn.GroupNorm(G, C), nn.SiLU(), nn.Conv2d(C, out_ch, 3, padding=1), nn.Sigmoid())
+
+    def forward(self, z):
+        h = self.in_proj(z).reshape(z.size(0), 2*self.C, self.sp, self.sp)
+        return self.out(self.up2(self.up1(self.mid(h))))
+
+
+class CIFARVAE(nn.Module):
+    """Convolutional β-VAE for CIFAR-10 with a global latent vector.
+
+    Interface matches the MNIST VAE:
+        mu, logvar = vae.encoder(x)   # x: (B,3,32,32) in [0,1]
+        img        = vae.decoder(z)   # z: (B, latent_dim) -> (B,3,32,32) in [0,1]
+    """
+    def __init__(self, latent_dim=128, base_channels=128, image_size=32,
+                 in_channels=3, num_groups=32, attn_heads=4):
+        super().__init__()
+        sp = image_size // 4   # spatial size at bottleneck (32 → 8)
+        C, G = base_channels, num_groups
+        self.encoder = _CIFAREncoder(in_channels, C, latent_dim, G, attn_heads, sp)
+        self.decoder = _CIFARDecoder(in_channels, C, latent_dim, G, attn_heads, sp)
+
+    def reparameterize(self, mu, logvar):
+        std = (0.5 * logvar.clamp(-30, 20)).exp()
+        return mu + std * torch.randn_like(std)
+
+    def forward(self, x):
+        mu, logvar = self.encoder(x)
+        return self.decoder(self.reparameterize(mu, logvar)), mu, logvar
+
+
+def load_cifar_vae(weights_path=None, device=None):
+    """Load the trained CIFAR-10 β-VAE. Run scripts/train_vae.py first to produce weights."""
+    weights_path = weights_path or _CIFAR_WEIGHTS_PATH
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(f"{weights_path} not found — run scripts/train_vae.py first")
+    ck = torch.load(weights_path, map_location="cpu", weights_only=False)
+    vae = CIFARVAE(**ck.get("spec", _CIFAR_VAE_SPEC))
+    vae.load_state_dict(ck["state_dict"])
+    return vae.to(device or _pick_device()).eval()
