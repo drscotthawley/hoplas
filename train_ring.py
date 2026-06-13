@@ -31,10 +31,10 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
         xb, yb = x['data'].to(device), y['data'].to(device)
         xproj, yproj = proj(xb), proj(yb)
         xproj_t = trans_op(xproj)
-        xprime = inv_proj(xproj)
+        xprime, yprime = inv_proj(xproj), inv_proj(yproj)
         sim = sim_fn(xproj_t, yproj)
         sigreg = SIGReg(torch.cat([xproj_t, yproj], dim=0), global_step=epoch)
-        recon = sim_fn(xprime, xb)
+        recon = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))
         loss = (1 - args.lambd) * sim + args.lambd * sigreg + args.lambda_recon * recon
         bs = xb.size(0)
         tot_loss += loss.item() * bs; tot_sim += sim.item() * bs
@@ -97,7 +97,7 @@ def train(args):
         {"params": op_nodecay,   "weight_decay": 0.0,             "lr": op_lr},
     ], lr=args.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=args.lr_patience, min_lr=args.lr / 500)
+        optimizer, mode="min", factor=0.5, patience=args.lr_patience, min_lr=args.lr / 50)
     sim_fn = nn.MSELoss()
     sim_ema = None  # smoothed sim for the scheduler (sigreg flattens, so don't anneal on total)
 
@@ -120,10 +120,10 @@ def train(args):
                 optimizer.zero_grad()
                 xproj, yproj = proj(xb), proj(yb)  # project into new space
                 xproj_t = trans_op(xproj)          # transform/rotate
-                xprime = inv_proj(xproj)           # reconstruct original from embedding
+                xprime, yprime = inv_proj(xproj), inv_proj(yproj)  # reconstruct both from embedding
                 sim_loss = sim_fn(xproj_t, yproj) # pull toward next one in sequence
                 sigreg_loss = SIGReg( torch.cat([xproj_t, yproj], dim=0), global_step=epoch )  # pull distribution toward Gaussian
-                recon_loss = sim_fn(xprime, xb)   # autoencoder: inv_proj(proj(x)) ~ x
+                recon_loss = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))  # inv_proj sees both x and y
                 loss = (1 - args.lambd) * sim_loss + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
                 loss.backward()
                 optimizer.step()
@@ -181,23 +181,27 @@ def train(args):
 
 def main():
     p = configargparse.ArgumentParser(description="Ring task with different model variants.")
+    p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--config", is_config_file=True, help="path to a config file (keys = dest names with underscores)")
-    p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
     p.add_argument("--dataset", choices=["line", "mnist"], default="line",
                    help="line=synthetic ring; mnist=VAE encodings (nd forced to 16)")
     p.add_argument("--epochs", type=int, default=1000)
-    p.add_argument("--lr", type=float, default=0.001)
-    p.add_argument("--lr-patience", type=int, default=20, help="ReduceLROnPlateau patience (epochs)")
+    p.add_argument("--inf-every", type=int, default=20,
+                   help="Log MNIST inference grids to W&B every N epochs (0 disables; mnist only)")
     p.add_argument("--lambd", type=float, default=0.01,
                    help="SIGReg weight: loss = (1-lambd)*sim + lambd*sigreg")
     p.add_argument("--lambda-recon", type=float, default=1.0,
                    help="Weight on inv_proj autoencoder reconstruction loss (0 disables)")
+    p.add_argument("--lr", type=float, default=0.002)
+    p.add_argument("--lr-patience", type=int, default=50, help="ReduceLROnPlateau patience (epochs)")
+    p.add_argument("--max-viz-points", type=int, default=1000,
+                   help="Max points to accumulate per epoch for the W&B embedding scatter")
     p.add_argument("--n-hid", type=int, default=32, help="Projector hidden dim")
     p.add_argument("--nd", type=int, default=3, help="Dimension of the space")
-    p.add_argument("--npoints", type=int, default=12, help="Number of quantized points on the line")
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--noise", type=float, default=0.01, help="Jitter added to each point")
+    p.add_argument("--npoints", type=int, default=12, help="Number of quantized points on the line")
     p.add_argument("--op", choices=["filmr", "filmr_expm", "matop", "matop2", "ph"], default="filmr_expm")
     p.add_argument("--op-lr", type=float, default=None,
                    help="Separate LR for trans_op (default: same as --lr). Lower it to slow the angle's climb.")
@@ -216,10 +220,6 @@ def main():
     p.add_argument("--tag", type=str, default="", help="tag to append to wandb run name")
     p.add_argument("--unit-norm", action=argparse.BooleanOptionalAction, default=True,
                    help="L2-normalize projector output onto the unit sphere")
-    p.add_argument("--inf-every", type=int, default=50,
-                   help="Log MNIST inference grids to W&B every N epochs (0 disables; mnist only)")
-    p.add_argument("--max-viz-points", type=int, default=1000,
-                   help="Max points to accumulate per epoch for the W&B embedding scatter")
     p.add_argument("--val-every", type=int, default=4,
                    help="Evaluate on held-out split every N epochs (0 disables)")
     p.add_argument("--weight-decay", type=float, default=1e-4,
