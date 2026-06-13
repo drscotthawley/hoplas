@@ -7,44 +7,14 @@ import torch
 import wandb
 from tqdm import tqdm
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from hoplas.filmr import FiLMR, FiLMR_expm, MatOp, MatOp2
-from hoplas.ph_layers import PHMLinear
 from hoplas.data import LineDataset, MNISTEncodingsDataset
 from hoplas.models import Projector
+from hoplas.ops import OpWrapper
 from hoplas.losses import SIGReg
 from hoplas.viz import embedding_scatter3d
 
-
-class build_op(nn.Module):
-    """Builds the transform op, optionally as a residual x + op(x).
-    op_resid centers the transform at identity (good for many ring points;
-    redundant for filmr_expm, already near-identity via matrix_exp)."""
-    def __init__(self, method: str, nd: int, order: int, op_resid: bool = False, rank: int = 2,
-                 unit_norm: bool = True):
-        super().__init__()
-        self.op_resid = op_resid
-        self.unit_norm = unit_norm    # L2-normalize output onto unit sphere (matches projector)
-        if method == "filmr":
-            self.op = FiLMR(nd=nd)
-        elif method == "filmr_expm":
-            self.op = FiLMR_expm(nd=nd, rank=rank)
-        elif method == "matop":
-            self.op = MatOp(nd=nd)
-        elif method == "matop2":
-            self.op = MatOp2(nd=nd)
-        elif method == "ph":
-            if nd % order != 0:
-                raise ValueError(f"nd={nd} must be divisible by order={order} for PHMLinear")
-            self.op = PHMLinear(n=order, in_features=nd, out_features=nd)
-        else:
-            raise ValueError(f"Unknown method: {method}")
-
-    def forward(self, x):
-        out = x + self.op(x) if self.op_resid else self.op(x)
-        return F.normalize(out, dim=-1) if self.unit_norm else out
 
 
 @torch.no_grad()
@@ -90,7 +60,7 @@ def train(args):
         wandb.init(project=project, name=run_name, config=vars(args))
 
     proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=args.unit_norm).to(device)
-    trans_op = build_op(args.op, args.nd, args.order, args.op_resid, args.rank, args.unit_norm).to(device)
+    trans_op = OpWrapper(args.op, args.nd, args.order, args.op_resid, args.rank, args.unit_norm).to(device)
     # inverse projector: maps embedding back to original space (unit_norm=False: output isn't on the sphere)
     inv_proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, unit_norm=False).to(device)
 
@@ -128,10 +98,7 @@ def train(args):
 
     try:
         for epoch in range(1, args.epochs + 1):
-            total_loss = 0.0
-            total_sim = 0.0
-            total_sigreg = 0.0
-            total_recon = 0.0
+            totals = dict(loss=0.0, sim=0.0, sigreg=0.0, recon=0.0)
             pbar = tqdm(loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
             for x, y in pbar:
                 xb, yb = x['data'].to(device), y['data'].to(device)
@@ -145,20 +112,16 @@ def train(args):
                 loss = (1 - args.lambd) * sim_loss + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
                 loss.backward()
                 optimizer.step()
-                total_loss += loss.item() * xb.size(0)
-                total_sim += sim_loss.item() * xb.size(0)
-                total_sigreg += sigreg_loss.item() * xb.size(0)
-                total_recon += recon_loss.item() * xb.size(0)
+                bs = xb.size(0)
+                for k, v in zip(totals, [loss, sim_loss, sigreg_loss, recon_loss]):
+                    totals[k] += v.item() * bs
                 pbar.set_postfix(loss=f"{loss.item():.6f}")
-            avg_loss = total_loss / len(dataset)
-            avg_sim = total_sim / len(dataset)
-            avg_sigreg = total_sigreg / len(dataset)
-            avg_recon = total_recon / len(dataset)
-            sim_ema = avg_sim if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg_sim
+            avg = {k: v / len(dataset) for k, v in totals.items()}
+            sim_ema = avg["sim"] if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg["sim"]
             scheduler.step(sim_ema)  # anneal on smoothed sim, not total (sigreg flattens by design)
             op_angle = trans_op.op.rotation_angle_deg() if args.op == "filmr_expm" else None
             angle_str = f"  angle={op_angle:.2f}deg" if op_angle is not None else ""
-            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.6f}  sim={avg_sim:.6f}  sigreg={avg_sigreg:.6f}  recon={avg_recon:.6f}{angle_str}")
+            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg['loss']:.6f}  sim={avg['sim']:.6f}  sigreg={avg['sigreg']:.6f}  recon={avg['recon']:.6f}{angle_str}")
 
             do_val = args.val_every and (epoch % args.val_every == 0 or epoch == 1)
             if do_val:
@@ -172,9 +135,9 @@ def train(args):
                                 "trans_op": trans_op.state_dict()}, ckpt_path)
 
             if wandb.run is not None:
-                log = {"epoch": epoch, "loss": avg_loss, "lr": optimizer.param_groups[0]["lr"],
-                       "sim_loss": avg_sim, "sim_ema": sim_ema, "sigreg_loss": avg_sigreg,
-                       "recon_loss": avg_recon}
+                log = {"epoch": epoch, "loss": avg["loss"], "lr": optimizer.param_groups[0]["lr"],
+                       "sim_loss": avg["sim"], "sim_ema": sim_ema, "sigreg_loss": avg["sigreg"],
+                       "recon_loss": avg["recon"]}
                 if do_val:
                     log.update({"val_loss": val_loss, "val_sim_loss": val_sim,
                                 "val_sigreg_loss": val_sigreg, "val_recon_loss": val_recon})
