@@ -216,7 +216,7 @@ def main():
     p.add_argument("--tag", type=str, default="", help="tag to append to wandb run name")
     p.add_argument("--unit-norm", action=argparse.BooleanOptionalAction, default=True,
                    help="L2-normalize projector output onto the unit sphere")
-    p.add_argument("--viz-every", type=int, default=50,
+    p.add_argument("--inf-every", type=int, default=50,
                    help="Log MNIST inference grids to W&B every N epochs (0 disables; mnist only)")
     p.add_argument("--max-viz-points", type=int, default=1000,
                    help="Max points to accumulate per epoch for the W&B embedding scatter")
