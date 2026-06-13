@@ -2,6 +2,7 @@
 """Ring-task training via four model variants. (dataset/models WIP)"""
 
 import argparse
+import os
 import torch
 import wandb
 from tqdm import tqdm
@@ -101,17 +102,29 @@ def train(args):
     # weight-decay only on >=2D weights (proj Linears, FiLMR_expm.W); never on
     # gamma/beta/bias/norms. For expm this also pulls W toward the minimal-angle
     # generator, keeping matrix_exp accurate and preventing slow precision drift.
-    params = list(proj.parameters()) + list(trans_op.parameters()) + list(inv_proj.parameters())
-    decay = [p for p in params if p.ndim >= 2]
-    no_decay = [p for p in params if p.ndim < 2]
+    # The op gets its own lr (--op-lr): slowing the op relative to the projector
+    # lets the rotation angle climb gently and lock onto the first (single-ring)
+    # closure sheet instead of overshooting it.
+    op_lr = args.op_lr if args.op_lr is not None else args.lr
+    other_params = list(proj.parameters()) + list(inv_proj.parameters())
+    op_params = list(trans_op.parameters())
+    split = lambda ps: ([p for p in ps if p.ndim >= 2], [p for p in ps if p.ndim < 2])
+    other_decay, other_nodecay = split(other_params)
+    op_decay, op_nodecay = split(op_params)
     optimizer = torch.optim.AdamW([
-        {"params": decay, "weight_decay": args.weight_decay},
-        {"params": no_decay, "weight_decay": 0.0},
+        {"params": other_decay,  "weight_decay": args.weight_decay, "lr": args.lr},
+        {"params": other_nodecay, "weight_decay": 0.0,             "lr": args.lr},
+        {"params": op_decay,     "weight_decay": args.weight_decay, "lr": op_lr},
+        {"params": op_nodecay,   "weight_decay": 0.0,             "lr": op_lr},
     ], lr=args.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=args.lr_patience, min_lr=args.lr / 1000)
+        optimizer, mode="min", factor=0.5, patience=args.lr_patience, min_lr=args.lr / 500)
     sim_fn = nn.MSELoss()
     sim_ema = None  # smoothed sim for the scheduler (sigreg flattens, so don't anneal on total)
+
+    os.makedirs("checkpoints", exist_ok=True)
+    ckpt_path = os.path.join("checkpoints", f"{run_name}.pt")
+    best_val = float("inf")  # save the checkpoint with the lowest val loss
 
     try:
         for epoch in range(1, args.epochs + 1):
@@ -152,6 +165,11 @@ def train(args):
                 val_loss, val_sim, val_sigreg, val_recon = evaluate(
                     val_loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args)
                 print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}")
+                if val_loss < best_val:
+                    best_val = val_loss
+                    torch.save({"epoch": epoch, "val_loss": val_loss, "args": vars(args),
+                                "proj": proj.state_dict(), "inv_proj": inv_proj.state_dict(),
+                                "trans_op": trans_op.state_dict()}, ckpt_path)
 
             if wandb.run is not None:
                 log = {"epoch": epoch, "loss": avg_loss, "lr": optimizer.param_groups[0]["lr"],
@@ -192,6 +210,8 @@ def main():
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--noise", type=float, default=0.01, help="Jitter added to each point")
     p.add_argument("--op", choices=["filmr", "filmr_expm", "matop", "matop2", "ph"], default="filmr_expm")
+    p.add_argument("--op-lr", type=float, default=None,
+                   help="Separate LR for trans_op (default: same as --lr). Lower it to slow the angle's climb.")
     p.add_argument("--op-resid", action=argparse.BooleanOptionalAction, default=True,
                    help="Wrap trans_op as x + op(x) (centers transform at identity; good for many ring points)")
     p.add_argument("--order", type=int, default=4,
