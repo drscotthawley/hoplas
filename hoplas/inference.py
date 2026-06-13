@@ -72,6 +72,17 @@ def apply_operation(z_batch, proj, trans_op, inv_proj):
 
 
 @torch.no_grad()
+def make_viz_grids(vae, proj, trans_op, inv_proj, imgs):
+    """Encode imgs, run recon and transform pipelines, decode both.
+    Returns (imgs_input, imgs_recon, imgs_transformed) as CPU tensors in [0,1].
+    Caller is responsible for setting models to eval mode beforehand."""
+    mu, _ = vae.encoder(imgs)
+    imgs_recon = vae.decoder(inv_proj(proj(mu))).clamp(0, 1).cpu()
+    imgs_xform = vae.decoder(apply_operation(mu, proj, trans_op, inv_proj)).clamp(0, 1).cpu()
+    return imgs.cpu(), imgs_recon, imgs_xform
+
+
+@torch.no_grad()
 def run_demo(ckpt_path, out_dir=".", n_per_class=10, device=None):
     """Full pipeline: load checkpoint, encode MNIST grid, transform, decode, save PNGs."""
     proj, trans_op, inv_proj, device = load_for_inference(ckpt_path, device)
@@ -79,15 +90,11 @@ def run_demo(ckpt_path, out_dir=".", n_per_class=10, device=None):
 
     imgs = make_class_ordered_images(n_per_class).to(device)   # (100, 1, 28, 28)
 
-    mu, _ = vae.encoder(imgs)                              # image -> latent mu
-    mu_t = apply_operation(mu, proj, trans_op, inv_proj)   # transformed latent
-    mu_recon = inv_proj(proj(mu))                          # round-trip baseline (no op)
-    imgs_recon = vae.decoder(mu_recon).clamp(0, 1)
-    imgs_transformed = vae.decoder(mu_t).clamp(0, 1)
+    imgs_input, imgs_recon, imgs_xform = make_viz_grids(vae, proj, trans_op, inv_proj, imgs)
 
     os.makedirs(out_dir, exist_ok=True)
-    for tensor, fname in [(imgs, "mnist_input.png"), (imgs_recon, "mnist_recon.png"), (imgs_transformed, "mnist_transformed.png")]:
-        save_image(make_grid(tensor.cpu(), nrow=10), os.path.join(out_dir, fname))
+    for tensor, fname in [(imgs_input, "mnist_input.png"), (imgs_recon, "mnist_recon.png"), (imgs_xform, "mnist_transformed.png")]:
+        save_image(make_grid(tensor, nrow=10), os.path.join(out_dir, fname))
     print(f"saved: {out_dir}/mnist_input.png  mnist_recon.png  mnist_transformed.png")
 
 

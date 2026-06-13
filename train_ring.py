@@ -10,10 +10,13 @@ from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from torchvision.utils import make_grid
 from hoplas.data import LineDataset, MNISTEncodingsDataset
+from hoplas.inference import make_class_ordered_images, make_viz_grids
 from hoplas.models import Projector
 from hoplas.ops import OpWrapper
 from hoplas.losses import SIGReg
+from hoplas.vae import load_mnist_vae
 from hoplas.viz import embedding_scatter3d
 
 
@@ -98,6 +101,12 @@ def train(args):
     sim_fn = nn.MSELoss()
     sim_ema = None  # smoothed sim for the scheduler (sigreg flattens, so don't anneal on total)
 
+    # load VAE + cache test grid once for periodic inference viz (mnist only)
+    vae, viz_imgs = None, None
+    if args.dataset == "mnist" and args.inf_every > 0 and wandb.run is not None:
+        vae = load_mnist_vae(device=str(device))
+        viz_imgs = make_class_ordered_images().to(device)
+
     os.makedirs("checkpoints", exist_ok=True)
     ckpt_path = os.path.join("checkpoints", f"{run_name}.pt")
     best_val = float("inf")  # tracks best val_sim (sigreg is ~constant, sim is the real quality signal)
@@ -156,6 +165,12 @@ def train(args):
                             vy, vxt, epoch, args.op, args.order,
                             yproj_labels=vyl, xproj_t_labels=vxl,
                             max_points=args.max_viz_points)
+                if vae is not None and args.inf_every > 0 and epoch % args.inf_every == 0:
+                    for m in (proj, trans_op, inv_proj): m.eval()
+                    imgs_in, imgs_recon, imgs_xform = make_viz_grids(vae, proj, trans_op, inv_proj, viz_imgs)
+                    for m in (proj, trans_op, inv_proj): m.train()
+                    def _wimg(t): return wandb.Image(make_grid(t, nrow=10).permute(1,2,0).numpy())
+                    log.update({"mnist_input": _wimg(imgs_in), "mnist_recon": _wimg(imgs_recon), "mnist_transformed": _wimg(imgs_xform)})
                 wandb.log(log)
     except KeyboardInterrupt:
         print("\ninterrupted — finishing run")
@@ -201,9 +216,11 @@ def main():
     p.add_argument("--tag", type=str, default="", help="tag to append to wandb run name")
     p.add_argument("--unit-norm", action=argparse.BooleanOptionalAction, default=True,
                    help="L2-normalize projector output onto the unit sphere")
+    p.add_argument("--viz-every", type=int, default=50,
+                   help="Log MNIST inference grids to W&B every N epochs (0 disables; mnist only)")
     p.add_argument("--max-viz-points", type=int, default=1000,
                    help="Max points to accumulate per epoch for the W&B embedding scatter")
-    p.add_argument("--val-every", type=int, default=1,
+    p.add_argument("--val-every", type=int, default=4,
                    help="Evaluate on held-out split every N epochs (0 disables)")
     p.add_argument("--weight-decay", type=float, default=1e-4,
                    help="Weight decay on >=2D weights (helps FiLMR_expm precision drift)")
