@@ -55,8 +55,7 @@ def _ensure_marco():
 
 def _pick_device():
     import torch
-    return ("cuda" if torch.cuda.is_available()
-            else "mps" if torch.backends.mps.is_available() else "cpu")
+    return "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 
 def load_mnist_vae(device=None):

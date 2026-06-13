@@ -2,6 +2,7 @@
 """Supervised learning of nd-dimensional rotations via four model variants."""
 
 import argparse
+import configargparse
 import torch
 import wandb
 from tqdm import tqdm
@@ -91,7 +92,8 @@ def train(args):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Learn nd rotations with different model variants.")
+    p = configargparse.ArgumentParser(description="Learn nd rotations with different model variants.")
+    p.add_argument("--config", is_config_file=True, help="path to a config file (keys = dest names with underscores)")
     p.add_argument("--method", choices=["filmr", "filmr_expm", "matop", "matop2", "ph"], default="filmr")
     p.add_argument("--nd", type=int, default=64, help="Dimension of the space")
     p.add_argument("--n-samples", type=int, default=40_000)

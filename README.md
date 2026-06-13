@@ -94,9 +94,17 @@ with constrained (low-order `ph`) operators.
 # single run
 ./train_simple_rot.py --method filmr_expm --nd 64
 
+# using a config file (CLI args override)
+./train_simple_rot.py --config my_rot.yaml --nd 128
+
 # full sweep over methods × correlation breadth, prints a final-loss table
 ./run_simple_rot.sh 0.9      # 0.9 = correlation strength among correlated channels
 ```
+
+Both scripts accept `--config <file.yaml>` (via
+[ConfigArgParse](https://github.com/bw2/ConfigArgParse)). Config keys use
+underscore `dest` names (e.g. `corr_nd: 4`, `n_samples: 50000`). CLI args
+always override the config file.
 
 Key args: `--method {filmr,filmr_expm,matop,matop2,ph}`, `--nd`, `--order`
 (hypercomplex order for `ph`), `--corr` (correlation strength in [0,1]),
@@ -146,7 +154,15 @@ Two datasets:
 
 # MNIST digit cycle (nd is forced to the VAE latent dim, 16)
 ./train_ring.py --dataset mnist --op filmr_expm --epochs 500
+
+# using a config file (CLI args override)
+./train_ring.py --config mnist_filmr.yaml --epochs 200
 ```
+
+Both scripts accept `--config <file.yaml>` (via
+[ConfigArgParse](https://github.com/bw2/ConfigArgParse)). Config keys use
+underscore `dest` names (e.g. `op: filmr_expm`, `op_lr: 0.0001`,
+`lambda_recon: 1.0`). CLI args always override the config file.
 
 Notable args: `--op`, `--rank` (rotation planes for `filmr_expm`), `--order`
 (hypercomplex order for `ph`), `--op-lr` (separate, usually *lower* LR for the

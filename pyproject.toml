@@ -24,6 +24,7 @@ dependencies = [
     "plotly",
     "safetensors",
     "gdown==5.2.0",
+    "configargparse",
 ]
 
 [project.optional-dependencies]

@@ -2,6 +2,7 @@
 """Ring-task training via four model variants. (dataset/models WIP)"""
 
 import argparse
+import configargparse
 import os
 import torch
 import wandb
@@ -14,7 +15,6 @@ from hoplas.models import Projector
 from hoplas.ops import OpWrapper
 from hoplas.losses import SIGReg
 from hoplas.viz import embedding_scatter3d
-
 
 
 @torch.no_grad()
@@ -64,9 +64,7 @@ def train(args):
     # inverse projector: maps embedding back to original space (unit_norm=False: output isn't on the sphere)
     inv_proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, unit_norm=False).to(device)
 
-    n_proj = sum(p.numel() for p in proj.parameters() if p.requires_grad)
-    n_op = sum(p.numel() for p in trans_op.parameters() if p.requires_grad)
-    n_inv = sum(p.numel() for p in inv_proj.parameters() if p.requires_grad)
+    n_proj, n_op, n_inv = (sum(p.numel() for p in m.parameters() if p.requires_grad) for m in [proj, trans_op, inv_proj])
     print(f"trainable params: projector={n_proj}  trans_op={n_op}  inv_proj={n_inv}")
 
     # weight-decay only on >=2D weights (proj Linears, FiLMR_expm.W); never on
@@ -155,7 +153,8 @@ def train(args):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Ring task with different model variants.")
+    p = configargparse.ArgumentParser(description="Ring task with different model variants.")
+    p.add_argument("--config", is_config_file=True, help="path to a config file (keys = dest names with underscores)")
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
     p.add_argument("--dataset", choices=["line", "mnist"], default="line",

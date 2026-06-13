@@ -28,11 +28,7 @@ _MNIST_ROOT = os.path.expanduser("~/datasets/mnist")
 
 def load_for_inference(ckpt_path, device=None):
     """Rebuild proj, trans_op, inv_proj from a checkpoint and return them in eval mode."""
-    import torch
-    if device is None:
-        device = ("cuda" if torch.cuda.is_available()
-                  else "mps" if torch.backends.mps.is_available() else "cpu")
-    device = torch.device(device)
+    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"))
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     a = ck["args"]
     proj = Projector(nd=a["nd"], n_hid=a["n_hid"], n_layers=a["proj_layers"],
@@ -42,9 +38,7 @@ def load_for_inference(ckpt_path, device=None):
     trans_op.load_state_dict(ck["trans_op"])
     inv_proj = Projector(nd=a["nd"], n_hid=a["n_hid"], n_layers=a["proj_layers"], unit_norm=False)
     inv_proj.load_state_dict(ck["inv_proj"])
-    proj.to(device).eval()
-    trans_op.to(device).eval()
-    inv_proj.to(device).eval()
+    for m in (proj, trans_op, inv_proj): m.to(device).eval()
     print(f"loaded checkpoint: epoch={ck['epoch']}  val_loss={ck['val_loss']:.6f}  op={a['op']}  nd={a['nd']}")
     return proj, trans_op, inv_proj, device
 
@@ -73,10 +67,8 @@ def make_class_ordered_images(n_per_class=10):
 
 @torch.no_grad()
 def apply_operation(z_batch, proj, trans_op, inv_proj):
-    """Latent -> proj -> op -> inv_proj -> latent'. Returns the transformed latent."""
-    zp = proj(z_batch)
-    zp_t = trans_op(zp)
-    return inv_proj(zp_t)
+    """Latent -> proj -> op -> inv_proj -> latent'."""
+    return inv_proj(trans_op(proj(z_batch)))
 
 
 @torch.no_grad()
@@ -87,25 +79,15 @@ def run_demo(ckpt_path, out_dir=".", n_per_class=10, device=None):
 
     imgs = make_class_ordered_images(n_per_class).to(device)   # (100, 1, 28, 28)
 
-    # encode: image -> latent mu
-    mu, _ = vae.encoder(imgs)
-
-    # transformed latent
-    mu_t = apply_operation(mu, proj, trans_op, inv_proj)
-
-    # reconstruct latents (no op, for baseline comparison)
-    zp = proj(mu)
-    mu_recon = inv_proj(zp)
-
-    # decode
+    mu, _ = vae.encoder(imgs)                              # image -> latent mu
+    mu_t = apply_operation(mu, proj, trans_op, inv_proj)   # transformed latent
+    mu_recon = inv_proj(proj(mu))                          # round-trip baseline (no op)
     imgs_recon = vae.decoder(mu_recon).clamp(0, 1)
     imgs_transformed = vae.decoder(mu_t).clamp(0, 1)
 
-    nrow = 10  # one column per digit class
     os.makedirs(out_dir, exist_ok=True)
-    save_image(make_grid(imgs.cpu(),           nrow=nrow), os.path.join(out_dir, "mnist_input.png"))
-    save_image(make_grid(imgs_recon.cpu(),     nrow=nrow), os.path.join(out_dir, "mnist_recon.png"))
-    save_image(make_grid(imgs_transformed.cpu(), nrow=nrow), os.path.join(out_dir, "mnist_transformed.png"))
+    for tensor, fname in [(imgs, "mnist_input.png"), (imgs_recon, "mnist_recon.png"), (imgs_transformed, "mnist_transformed.png")]:
+        save_image(make_grid(tensor.cpu(), nrow=10), os.path.join(out_dir, fname))
     print(f"saved: {out_dir}/mnist_input.png  mnist_recon.png  mnist_transformed.png")
 
 
