@@ -32,12 +32,13 @@ def load_for_inference(ckpt_path, device=None):
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"))
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     a = ck["args"]
-    proj = Projector(nd=a["nd"], n_hid=a["n_hid"], n_layers=a["proj_layers"],
+    pnd = a.get("pnd", a["nd"])  # backward compat with checkpoints before pnd was added
+    proj = Projector(nd=a["nd"], pnd=pnd, n_hid=a["n_hid"], n_layers=a["proj_layers"],
                      proj_resid=a["proj_resid"], unit_norm=a["unit_norm"])
     proj.load_state_dict(ck["proj"])
-    trans_op = OpWrapper(a["op"], a["nd"], a["order"], a["op_resid"], a["rank"], a["unit_norm"])
+    trans_op = OpWrapper(a["op"], pnd, a["order"], a["op_resid"], a["rank"], a["unit_norm"])
     trans_op.load_state_dict(ck["trans_op"])
-    inv_proj = Projector(nd=a["nd"], n_hid=a["n_hid"], n_layers=a["proj_layers"], unit_norm=False)
+    inv_proj = Projector(nd=pnd, pnd=a["nd"], n_hid=a["n_hid"], n_layers=a["proj_layers"], unit_norm=False)
     inv_proj.load_state_dict(ck["inv_proj"])
     for m in (proj, trans_op, inv_proj): m.to(device).eval()
     print(f"loaded checkpoint: epoch={ck['epoch']}  val_sim_loss={ck['val_sim_loss']:.6f}  op={a['op']}  nd={a['nd']}")

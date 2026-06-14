@@ -61,9 +61,11 @@ def train(args):
         dataset = EncodingsDataset(pt_path=pt, split="train")
         val_dataset = EncodingsDataset(pt_path=pt, split="test", debug=False)
         args.nd = dataset.nd
+    if args.pnd is None:
+        args.pnd = args.nd
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
-    print(f"device={device}  op={args.op}  dataset={args.dataset}  nd={args.nd}")
+    print(f"device={device}  op={args.op}  dataset={args.dataset}  nd={args.nd}  pnd={args.pnd}")
 
     run_name = f"{args.op}_{args.order}" if args.op == "ph" else args.op
     run_name = f"{args.dataset}_{run_name}"
@@ -72,10 +74,10 @@ def train(args):
     if not args.no_wandb:
         wandb.init(project=project, name=run_name, config=vars(args))
 
-    proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=args.unit_norm).to(device)
-    trans_op = OpWrapper(args.op, args.nd, args.order, args.op_resid, args.rank, args.unit_norm).to(device)
-    # inverse projector: maps embedding back to original space (unit_norm=False: output isn't on the sphere)
-    inv_proj = Projector(nd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, unit_norm=False).to(device)
+    proj = Projector(nd=args.nd, pnd=args.pnd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=args.unit_norm).to(device)
+    trans_op = OpWrapper(args.op, args.pnd, args.order, args.op_resid, args.rank, args.unit_norm).to(device)
+    # inverse projector: maps pnd back to nd (unit_norm=False: output isn't on the sphere)
+    inv_proj = Projector(nd=args.pnd, pnd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, unit_norm=False).to(device)
 
     n_proj, n_op, n_inv = (sum(p.numel() for p in m.parameters() if p.requires_grad) for m in [proj, trans_op, inv_proj])
     print(f"trainable params: projector={n_proj}  trans_op={n_op}  inv_proj={n_inv}")
@@ -211,6 +213,8 @@ def main():
                    help="Wrap trans_op as x + op(x) (centers transform at identity; good for many ring points)")
     p.add_argument("--order", type=int, default=4,
                    help="Hypercomplex order n for PHMLinear (nd must be divisible by order)")
+    p.add_argument("--pnd", type=int, default=None,
+                   help="Projected space dimension (default: same as --nd)")
     p.add_argument("--proj-layers", type=int, default=3, help="Projector number of layers")
     p.add_argument("--proj-resid", action="store_true",
                    help="Global nd->nd skip in Projector (learn perturbation of identity)")

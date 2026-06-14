@@ -21,24 +21,25 @@ class ResBlock(nn.Module):
 
 
 class Projector(nn.Module):
-    """h(): a learned nonlinear map nd -> nd (via n_hid).
+    """h(): a learned nonlinear map nd -> pnd (via n_hid).
 
-    Input (nd->n_hid) and output (n_hid->nd) layers change dims so they're plain;
+    Input (nd->n_hid) and output (n_hid->pnd) layers change dims so they're plain;
     the middle n_hid->n_hid layers use residual skips.
+    pnd defaults to nd (square map). proj_resid is disabled when nd != pnd.
     """
-    def __init__(self, nd=64, n_hid=32, n_layers=3, norm="none", proj_resid=False, unit_norm=True):  # norm in {none,batch,layer}
+    def __init__(self, nd=64, pnd=None, n_hid=32, n_layers=3, norm="none", proj_resid=False, unit_norm=True):
         super().__init__()
         assert n_layers >= 2, "need at least an input and output layer"
-        self.proj_resid = proj_resid  # global nd->nd skip: learn a perturbation of identity
-        self.unit_norm = unit_norm    # L2-normalize output onto the unit sphere
+        self.pnd = pnd if pnd is not None else nd
+        self.proj_resid = proj_resid and (nd == self.pnd)  # skip only valid when dims match
+        self.unit_norm = unit_norm
         self.in_proj = nn.Linear(nd, n_hid)
         self.in_norm = _norm(norm, n_hid)
         self.act = nn.GELU()
         self.blocks = nn.ModuleList(ResBlock(n_hid, norm) for _ in range(n_layers - 2))
-        self.out_proj = nn.Linear(n_hid, nd)
+        self.out_proj = nn.Linear(n_hid, self.pnd)
 
     def forward(self, y):
-        """y = encodings; returns z = points projected into the new space (raw, no final norm/act)."""
         z = self.act(self.in_norm(self.in_proj(y)))
         for block in self.blocks:
             z = block(z)
