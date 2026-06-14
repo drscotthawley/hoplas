@@ -133,14 +133,14 @@ def train(args):
 
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--dataset",      choices=["mnist", "cifar10"], default="mnist")
-    p.add_argument("--batch-size",   type=int,   default=256)
-    p.add_argument("--cpu",          action="store_true")
-    p.add_argument("--epochs",       type=int,   default=30)
-    p.add_argument("--lr",           type=float, default=3e-4)
-    p.add_argument("--num-workers",  type=int,   default=4)
-    p.add_argument("--weight-decay", type=float, default=1e-4)
+    p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("--dataset",      choices=["mnist", "cifar10"], default="mnist",  help="Dataset to train on")
+    p.add_argument("--batch-size",   type=int,   default=256,  help="Mini-batch size")
+    p.add_argument("--cpu",          action="store_true",       help="Force CPU even if GPU/MPS available")
+    p.add_argument("--epochs",       type=int,   default=30,   help="Number of training epochs")
+    p.add_argument("--lr",           type=float, default=3e-4, help="Peak learning rate (cosine annealed)")
+    p.add_argument("--num-workers",  type=int,   default=4,    help="DataLoader worker processes")
+    p.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
     args = p.parse_args()
     train(args)
 
