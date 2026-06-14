@@ -69,19 +69,29 @@ def make_class_ordered_images(dataset="mnist", n_per_class=10):
 
 
 @torch.no_grad()
-def apply_operation(z_batch, proj, trans_op, inv_proj):
-    """Latent -> proj -> op -> inv_proj -> latent'."""
-    return inv_proj(trans_op(proj(z_batch)))
+def apply_operation(z_batch, proj, trans_op, inv_proj, repeat=1):
+    """Latent -> proj -> op(^repeat) -> inv_proj -> latent'.
+
+    repeat composes the operator in the projected space (op applied `repeat` times
+    before a single inv_proj), so e.g. repeat=2 advances two steps. repeat=n_classes
+    would in principle close the ring, though a truly generative op need not return
+    exactly to the start.
+    """
+    h = proj(z_batch)
+    for _ in range(repeat):
+        h = trans_op(h)
+    return inv_proj(h)
 
 
 @torch.no_grad()
-def make_viz_grids(vae, proj, trans_op, inv_proj, imgs):
+def make_viz_grids(vae, proj, trans_op, inv_proj, imgs, repeat=1):
     """Encode imgs, run recon and transform pipelines, decode both.
     Returns (imgs_input, imgs_recon, imgs_transformed) as CPU tensors in [0,1].
+    repeat composes the op that many times (see apply_operation).
     Caller is responsible for setting models to eval mode beforehand."""
     mu, _ = vae.encoder(imgs)
     imgs_recon = vae.decoder(inv_proj(proj(mu))).clamp(0, 1).cpu()
-    imgs_xform = vae.decoder(apply_operation(mu, proj, trans_op, inv_proj)).clamp(0, 1).cpu()
+    imgs_xform = vae.decoder(apply_operation(mu, proj, trans_op, inv_proj, repeat=repeat)).clamp(0, 1).cpu()
     return imgs.cpu(), imgs_recon, imgs_xform
 
 
