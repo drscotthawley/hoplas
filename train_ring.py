@@ -15,9 +15,27 @@ from hoplas.data import LineDataset, EncodingsDataset
 from hoplas.inference import make_class_ordered_images, make_viz_grids
 from hoplas.models import Projector
 from hoplas.ops import OpWrapper
-from hoplas.losses import SIGReg
+from hoplas.losses import SIGReg, MomMatchLoss
 from hoplas.vae import load_vae
 from hoplas.viz import embedding_scatter3d
+
+
+class WarmupThenPlateauWithReduction:
+    """Linear LR warmup for the first `boundary` epochs, then ReduceLROnPlateau.
+
+    SequentialLR can't hold ReduceLROnPlateau (it's metric-driven, not an LRScheduler),
+    so this thin router does the phase switch instead. Call once per epoch:
+        scheduler.step(metric, epoch)
+    The warmup scheduler ignores `metric`; the plateau scheduler ignores `epoch`.
+    """
+    def __init__(self, warmup, plateau, boundary):
+        self.warmup, self.plateau, self.boundary = warmup, plateau, boundary
+
+    def step(self, metric, epoch):
+        if self.warmup is not None and epoch <= self.boundary:
+            self.warmup.step()
+        else:
+            self.plateau.step(metric)
 
 
 @torch.no_grad()
@@ -25,7 +43,7 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
     """Run the same losses over a held-out loader (no grad) for generalization metrics.
     If max_viz > 0, also accumulates up to max_viz projected points for visualization."""
     proj.eval(); trans_op.eval(); inv_proj.eval()
-    n = tot_loss = tot_sim = tot_sigreg = tot_recon = 0.0
+    n = tot_loss = tot_sim = tot_mom = tot_sigreg = tot_recon = tot_va = tot_vb = 0.0
     viz_y, viz_xt, viz_yl, viz_xl, viz_n = [], [], [], [], 0
     for x, y in loader:
         xb, yb = x['data'].to(device), y['data'].to(device)
@@ -33,20 +51,24 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
         xproj_t = trans_op(xproj)
         xprime, yprime = inv_proj(xproj), inv_proj(yproj)
         sim = sim_fn(xproj_t, yproj)
+        mom, stats = MomMatchLoss(xproj_t, yproj, labels=x['label'].to(device),
+                                  diag=args.mom_diag, cov_weight=args.mom_cov_weight, return_stats=True)
         sigreg = SIGReg(torch.cat([xproj_t, yproj], dim=0), global_step=epoch)
         recon = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))
-        loss = (1 - args.lambd) * sim + args.lambd * sigreg + args.lambda_recon * recon
+        loss = (1 - args.lambd) * (args.lambda_sim * sim + mom) + args.lambd * sigreg + args.lambda_recon * recon
         bs = xb.size(0)
-        tot_loss += loss.item() * bs; tot_sim += sim.item() * bs
-        tot_sigreg += sigreg.item() * bs; tot_recon += recon.item() * bs; n += bs
+        tot_loss += loss.item() * bs; tot_sim += sim.item() * bs; tot_mom += mom.item() * bs
+        tot_sigreg += sigreg.item() * bs; tot_recon += recon.item() * bs
+        tot_va += stats["var_a"] * bs; tot_vb += stats["var_b"] * bs; n += bs
         if max_viz > 0 and viz_n < max_viz:
             viz_y.append(yproj); viz_xt.append(xproj_t)
             viz_yl.append(y['label']); viz_xl.append(x['label'])
             viz_n += bs
     proj.train(); trans_op.train(); inv_proj.train()
-    losses = (tot_loss / n, tot_sim / n, tot_sigreg / n, tot_recon / n)
+    losses = (tot_loss / n, tot_sim / n, tot_mom / n, tot_sigreg / n, tot_recon / n)
+    var_stats = {"var_xproj_t": tot_va / n, "var_yproj": tot_vb / n}
     viz = (torch.cat(viz_y), torch.cat(viz_xt), torch.cat(viz_yl), torch.cat(viz_xl)) if viz_y else None
-    return losses, viz
+    return losses, var_stats, viz
 
 
 def train(args):
@@ -73,6 +95,9 @@ def train(args):
     project = {"line": "ring", "mnist": "ring-mnist", "cifar": "ring-cifar"}[args.dataset]
     if not args.no_wandb:
         wandb.init(project=project, name=run_name, config=vars(args))
+        # index every logged metric/media by epoch, so panel sliders (incl. images) read in epochs, not steps
+        wandb.define_metric("epoch")
+        wandb.define_metric("*", step_metric="epoch")
 
     proj = Projector(nd=args.nd, pnd=args.pnd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=args.unit_norm).to(device)
     trans_op = OpWrapper(args.op, args.pnd, args.order, args.op_resid, args.rank, args.unit_norm).to(device)
@@ -100,8 +125,12 @@ def train(args):
         {"params": op_decay,     "weight_decay": args.weight_decay, "lr": op_lr},
         {"params": op_nodecay,   "weight_decay": 0.0,             "lr": op_lr},
     ], lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=args.lr_patience, min_lr=args.lr / 50)
+    warmup = (torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=args.warmup_start_lr / args.lr, total_iters=args.warmup)
+        if args.warmup > 0 else None)  # constructing this immediately scales optimizer LRs down to the start
+    scheduler = WarmupThenPlateauWithReduction(warmup, plateau, args.warmup)
     sim_fn = nn.MSELoss()
     sim_ema = None  # smoothed sim for the scheduler (sigreg flattens, so don't anneal on total)
 
@@ -117,7 +146,7 @@ def train(args):
 
     try:
         for epoch in range(1, args.epochs + 1):
-            totals = dict(loss=0.0, sim=0.0, sigreg=0.0, recon=0.0)
+            totals = dict(loss=0.0, sim=0.0, mom=0.0, sigreg=0.0, recon=0.0)
             pbar = tqdm(loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
             for x, y in pbar:
                 xb, yb = x['data'].to(device), y['data'].to(device)
@@ -125,29 +154,31 @@ def train(args):
                 xproj, yproj = proj(xb), proj(yb)  # project into new space
                 xproj_t = trans_op(xproj)          # transform/rotate
                 xprime, yprime = inv_proj(xproj), inv_proj(yproj)  # reconstruct both from embedding
-                sim_loss = sim_fn(xproj_t, yproj) # pull toward next one in sequence
+                sim_loss = sim_fn(xproj_t, yproj) # weak per-sample anchor: sets *where* the cloud goes
+                mom_loss = MomMatchLoss(xproj_t, yproj, labels=x['label'].to(device),
+                                        diag=args.mom_diag, cov_weight=args.mom_cov_weight)  # match cloud *shape*
                 sigreg_loss = SIGReg( torch.cat([xproj_t, yproj], dim=0), global_step=epoch )  # pull distribution toward Gaussian
                 recon_loss = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))  # inv_proj sees both x and y
-                loss = (1 - args.lambd) * sim_loss + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
+                loss = (1 - args.lambd) * (args.lambda_sim * sim_loss + mom_loss) + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
                 loss.backward()
                 optimizer.step()
                 bs = xb.size(0)
-                for k, v in zip(totals, [loss, sim_loss, sigreg_loss, recon_loss]):
+                for k, v in zip(totals, [loss, sim_loss, mom_loss, sigreg_loss, recon_loss]):
                     totals[k] += v.item() * bs
                 pbar.set_postfix(loss=f"{loss.item():.6f}")
             avg = {k: v / len(dataset) for k, v in totals.items()}
             sim_ema = avg["sim"] if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg["sim"]
-            scheduler.step(sim_ema)  # anneal on smoothed sim, not total (sigreg flattens by design)
+            scheduler.step(sim_ema, epoch)  # warmup ramp, then anneal on smoothed sim (sigreg flattens by design)
             op_angle = trans_op.op.rotation_angle_deg() if args.op == "filmr_expm" else None
             angle_str = f"  angle={op_angle:.2f}deg" if op_angle is not None else ""
-            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg['loss']:.6f}  sim={avg['sim']:.6f}  sigreg={avg['sigreg']:.6f}  recon={avg['recon']:.6f}{angle_str}")
+            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg['loss']:.6f}  sim={avg['sim']:.6f}  mom={avg['mom']:.6f}  sigreg={avg['sigreg']:.6f}  recon={avg['recon']:.6f}{angle_str}")
 
             do_val = args.val_every and (epoch % args.val_every == 0 or epoch == 1)
             if do_val:
-                (val_loss, val_sim, val_sigreg, val_recon), viz = evaluate(
+                (val_loss, val_sim, val_mom, val_sigreg, val_recon), val_vars, viz = evaluate(
                     val_loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args,
                     max_viz=args.max_viz_points)
-                print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}")
+                print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  mom={val_mom:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}  var(xt/y)={val_vars['var_xproj_t']:.4f}/{val_vars['var_yproj']:.4f}")
                 if val_sim < best_val:
                     best_val = val_sim
                     torch.save({"epoch": epoch, "val_sim_loss": val_sim, "args": vars(args),
@@ -156,13 +187,14 @@ def train(args):
 
             if wandb.run is not None:
                 log = {"epoch": epoch, "loss": avg["loss"], "lr": optimizer.param_groups[0]["lr"],
-                       "sim_loss": avg["sim"], "sim_ema": sim_ema, "sigreg_loss": avg["sigreg"],
-                       "recon_loss": avg["recon"]}
+                       "sim_loss": avg["sim"], "sim_ema": sim_ema, "mom_loss": avg["mom"],
+                       "sigreg_loss": avg["sigreg"], "recon_loss": avg["recon"]}
                 if op_angle is not None:
                     log["op_angle_deg"] = op_angle
                 if do_val:
                     log.update({"val_loss": val_loss, "val_sim_loss": val_sim,
-                                "val_sigreg_loss": val_sigreg, "val_recon_loss": val_recon})
+                                "val_mom_loss": val_mom, "val_sigreg_loss": val_sigreg,
+                                "val_recon_loss": val_recon, **val_vars})
                     if viz is not None:
                         vy, vxt, vyl, vxl = viz
                         log["embedding"] = embedding_scatter3d(
@@ -173,7 +205,7 @@ def train(args):
                     for m in (proj, trans_op, inv_proj): m.eval()
                     imgs_in, imgs_recon, imgs_xform = make_viz_grids(vae, proj, trans_op, inv_proj, viz_imgs)
                     for m in (proj, trans_op, inv_proj): m.train()
-                    def _wimg(t): return wandb.Image(make_grid(t, nrow=10).permute(1,2,0).numpy())
+                    def _wimg(t): return wandb.Image(make_grid(t, nrow=10).permute(1,2,0).numpy(), caption=f"epoch {epoch}")
                     log.update({f"{args.dataset}_input": _wimg(imgs_in), f"{args.dataset}_recon": _wimg(imgs_recon), f"{args.dataset}_transformed": _wimg(imgs_xform)})
                 wandb.log(log)
     except KeyboardInterrupt:
@@ -197,10 +229,16 @@ def main():
                    help="SIGReg weight: loss = (1-lambd)*sim + lambd*sigreg")
     p.add_argument("--lambda-recon", type=float, default=1.0,
                    help="Weight on inv_proj autoencoder reconstruction loss (0 disables)")
+    p.add_argument("--lambda-sim", type=float, default=0.1,
+                   help="Weak weight on MSE sim inside the non-sigreg group: (1-lambd)*(lambda_sim*sim + mom)")
     p.add_argument("--lr", type=float, default=0.002)
     p.add_argument("--lr-patience", type=int, default=50, help="ReduceLROnPlateau patience (epochs)")
     p.add_argument("--max-viz-points", type=int, default=1000,
                    help="Max points to accumulate per epoch for the W&B embedding scatter")
+    p.add_argument("--mom-cov-weight", type=float, default=1.0,
+                   help="Weight on the covariance term inside MomMatchLoss (mean term fixed at 1)")
+    p.add_argument("--mom-diag", action="store_true",
+                   help="Match per-dim variances only in MomMatchLoss (robust when pnd >> samples/class, e.g. cifar)")
     p.add_argument("--n-hid", type=int, default=32, help="Projector hidden dim")
     p.add_argument("--nd", type=int, default=3, help="Dimension of the space")
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
@@ -228,6 +266,10 @@ def main():
                    help="L2-normalize projector output onto the unit sphere")
     p.add_argument("--val-every", type=int, default=4,
                    help="Evaluate on held-out split every N epochs (0 disables)")
+    p.add_argument("--warmup", type=int, default=50,
+                   help="Linear LR warmup epochs before ReduceLROnPlateau takes over (0 disables)")
+    p.add_argument("--warmup-start-lr", type=float, default=1e-5,
+                   help="LR at epoch 1 of warmup; ramps to --lr (and --op-lr) by epoch --warmup")
     p.add_argument("--weight-decay", type=float, default=1e-4,
                    help="Weight decay on >=2D weights (helps FiLMR_expm precision drift)")
     main_args = p.parse_args()
