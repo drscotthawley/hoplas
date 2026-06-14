@@ -12,9 +12,14 @@ demonstrates the cyclic structure lives in the operator. The k=0 point measures
 pipeline fidelity (recon, no op) and should sit near the classifier's clean
 accuracy ceiling.
 
+There's also a confusion-analysis mode (--confusion-k) that answers "is the plateau
+structure the OPERATOR or the JUDGE?" by deconvolving the fixed-k confusion matrix
+against the k=0 (recon) confusion kernel. See confusion_analysis() below.
+
 Usage:
     python scripts/score_transitions.py checkpoints/mnist_filmr_expm.pt
     python scripts/score_transitions.py CKPT --max-k 10 --n-samples 5000
+    python scripts/score_transitions.py CKPT --confusion-k 76 77 78   # operator-vs-judge
 """
 
 import argparse
@@ -22,13 +27,14 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import numpy as np
 import torch
 from torchvision.datasets import CIFAR10, MNIST
 from torchvision.transforms import ToTensor
 from torch.utils.data import DataLoader, Subset
 
 from hoplas.classifier import load_classifier
-from hoplas.inference import load_for_inference, transition_accuracy
+from hoplas.inference import apply_operation, load_for_inference, transition_accuracy
 from hoplas.vae import load_vae
 
 _ROOTS = {"mnist": os.path.expanduser("~/datasets/mnist"),
@@ -118,6 +124,119 @@ def _plot(accs, max_k, dataset, out, n_classes=10, ckpt_name=None):
     print(f"\nsaved plot -> {out}")
 
 
+# ───────────────────────── confusion / displacement analysis ─────────────────────────
+# "Is the plateau structure the OPERATOR or the JUDGE?"  At a fixed k, capture the full
+# confusion matrix C_k[i,pred] and deconvolve it against the k=0 (recon) matrix M, which
+# IS the classifier's own confusion kernel on decoded images.  Model:
+#     C_k[i,pred]  ≈  Σ_d w(d) · M[(i+d) mod n, pred]
+# i.e. "the op displaced each source class i by a distribution w(d) over displacements,
+# THEN the same judge confused the result per M."  A SHARP w(d) ⇒ the op has a definite
+# displacement and the spread in C_k is just classifier confusion (the user's read).
+# A BROAD w(d) ⇒ the op genuinely scattered points.  Either way w is judge-deconvolved.
+
+def _row_norm(counts):
+    """Rows -> probability distributions (empty rows left as zeros)."""
+    s = counts.sum(1, keepdims=True)
+    return counts / np.where(s == 0, 1, s)
+
+
+def _confusion_counts(vae, proj, trans_op, inv_proj, classifier, loader, ks, n_classes, device):
+    """Return {k: (n_classes, n_classes) int count matrix C_k[true_i, pred]} for each k in ks."""
+    mats = {k: np.zeros((n_classes, n_classes), dtype=np.int64) for k in ks}
+    for imgs, labels in loader:
+        mu, _ = vae.encoder(imgs.to(device))
+        lab = labels.numpy()
+        for k in ks:
+            z = apply_operation(mu, proj, trans_op, inv_proj, repeat=k)
+            preds = classifier(vae.decoder(z).clamp(0, 1)).argmax(1).cpu().numpy()
+            np.add.at(mats[k], (lab, preds), 1)
+    return mats
+
+
+def _fit_displacement(C, M, n):
+    """Non-negative least squares for w in  C[i,pred] ≈ Σ_d w(d)·M[(i+d)%n, pred].
+    Returns w normalized to sum 1, plus the fitted matrix and relative residual."""
+    A = np.zeros((n * n, n))
+    for i in range(n):
+        for pred in range(n):
+            for d in range(n):
+                A[i * n + pred, d] = M[(i + d) % n, pred]
+    b = C.reshape(-1)
+    try:
+        from scipy.optimize import nnls
+        w, _ = nnls(A, b)
+    except Exception:                       # no scipy -> lstsq then clip negatives
+        w, *_ = np.linalg.lstsq(A, b, rcond=None)
+        w = np.clip(w, 0, None)
+    s = w.sum()
+    w = w / s if s > 0 else w
+    C_hat = (A @ w).reshape(n, n)
+    resid = np.abs(C_hat - C).sum() / max(np.abs(C).sum(), 1e-12)
+    return w, C_hat, resid
+
+
+@torch.no_grad()
+def confusion_analysis(args):
+    proj, trans_op, inv_proj, device, dataset = load_for_inference(args.checkpoint, args.device)
+    vae = load_vae(dataset, device=str(device))
+    clf_key = "cifar10" if dataset.startswith("cifar") else "mnist"
+    classifier = load_classifier(clf_key, device=str(device))
+    n = args.n_classes
+
+    ks = sorted(set([0] + list(args.confusion_k)))   # k=0 is always needed as the kernel M
+    loader = _test_loader(dataset, args.n_samples, args.batch_size)
+    counts = _confusion_counts(vae, proj, trans_op, inv_proj, classifier, loader, ks, n, device)
+
+    M = _row_norm(counts[0].astype(float))           # judge confusion kernel (recon)
+    ckpt_name = os.path.basename(args.checkpoint)
+    for k in args.confusion_k:
+        C = _row_norm(counts[k].astype(float))
+        w, C_hat, resid = _fit_displacement(C, M, n)
+        d_star = int(np.argmax(w))
+        ent = -np.sum([p * np.log(p) for p in w if p > 0])      # nats; 0 = a delta, ln(n) = uniform
+        print(f"\n── confusion analysis  k={k}  (dataset={dataset}, n={counts[k].sum()}) ──")
+        print(f"  fitted displacement distribution w(d)  [op displaced source by d, then judge confused]:")
+        for d in range(n):
+            bar = "█" * int(round(w[d] * 40))
+            star = "  <- peak" if d == d_star else ""
+            print(f"    d={d:>2}  {w[d]*100:6.2f}%  {bar}{star}")
+        print(f"  peak displacement d*={d_star}   target-for-this-k = {k % n}   "
+              f"w-entropy={ent:.3f} nats (0=sharp, ln{n}={np.log(n):.2f}=uniform)   "
+              f"deconv residual={resid*100:.1f}%")
+        sharp = "SHARP -> operator has a definite displacement; spread in C_k is the JUDGE" if ent < 0.5 * np.log(n) \
+                else "BROAD -> operator genuinely SCATTERED points (not just confusion)"
+        print(f"  verdict: {sharp}")
+        if not args.no_plot:
+            out = args.confusion_out or f"confusion_k{k}.png"
+            _plot_confusion(M, C, C_hat, w, k, n, dataset, ckpt_name, out)
+
+
+def _plot_confusion(M, C, C_hat, w, k, n, dataset, ckpt_name, out):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 9))
+    for ax, mat, title in [(axes[0, 0], M, "M = judge kernel (k=0, recon)"),
+                           (axes[0, 1], C, f"C_k observed (k={k})"),
+                           (axes[1, 0], C_hat, "C_hat = Σ w(d)·M[(i+d)] (fit)")]:
+        im = ax.imshow(mat, vmin=0, vmax=1, cmap="viridis")
+        ax.set_xlabel("predicted class"); ax.set_ylabel("true source i")
+        ax.set_xticks(range(n)); ax.set_yticks(range(n))
+        ax.set_title(title, fontsize=10)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    axw = axes[1, 1]
+    axw.bar(range(n), w * 100, color="#2a6")
+    axw.axvline(k % n, ls="--", c="#c33", lw=1.5, label=f"target d = k mod n = {k % n}")
+    axw.set_xlabel("displacement d = (pred - i) mod n"); axw.set_ylabel("w(d)  [%]")
+    axw.set_xticks(range(n)); axw.set_title("fitted displacement w(d)", fontsize=10)
+    axw.legend(fontsize=8); axw.grid(alpha=0.3)
+    fig.suptitle(f"operator-vs-judge deconvolution — {dataset}  (k={k})\n{ckpt_name}", fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out, dpi=150)
+    print(f"  saved plot -> {out}")
+
+
 def main():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
                                 description="Score op^k transition accuracy with the pixel classifier.")
@@ -126,11 +245,19 @@ def main():
     p.add_argument("--n-classes",    type=int, default=10,   help="number of classes (ring size)")
     p.add_argument("--n-samples",    type=int, default=5000, help="test images to score (0 = full test set)")
     p.add_argument("--batch-size",   type=int, default=512,  help="eval batch size")
-    p.add_argument("--out",          type=str, default="op_k_transition.png", help="output plot path")
-    p.add_argument("--no-plot",      action="store_true",    help="skip plotting, print table only")
+    p.add_argument("--out",          type=str, default="op_k_transition.png", help="output plot path (transition curve)")
+    p.add_argument("--no-plot",      action="store_true",    help="skip plotting, print tables only")
     p.add_argument("--device",       type=str, default=None, help="cuda/mps/cpu (default: auto)")
+    p.add_argument("--confusion-k",  type=int, nargs="+", default=None, metavar="K",
+                   help="run operator-vs-judge confusion analysis at these k (skips the transition curve). "
+                        "k=0 is auto-included as the deconvolution kernel. e.g. --confusion-k 76 77 78")
+    p.add_argument("--confusion-out", type=str, default=None,
+                   help="confusion plot path (default: confusion_k{K}.png per k)")
     args = p.parse_args()
-    score(args)
+    if args.confusion_k:
+        confusion_analysis(args)
+    else:
+        score(args)
 
 
 if __name__ == "__main__":
