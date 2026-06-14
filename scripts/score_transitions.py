@@ -78,25 +78,34 @@ def score(args):
         print(f"  {k:>3}  {'(i+%d)%%%d' % (k, n_classes):>8}  {accs[k]*100:6.2f}%{tag}")
 
     if not args.no_plot:
-        _plot(accs, max_k, dataset, args.out)
+        _plot(accs, max_k, dataset, args.out, n_classes)
     return accs
 
 
-def _plot(accs, max_k, dataset, out):
+def _plot(accs, max_k, dataset, out, n_classes=10):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     ks = list(range(max_k + 1))
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(ks, [a * 100 for a in accs], "o-", lw=2, ms=7, color="#2a6")
+    # shrink markers as the curve gets long so points don't merge into a blob
+    ms = 7 if max_k <= 25 else (4 if max_k <= 60 else 3)
+    fig, ax = plt.subplots(figsize=(8, 4) if max_k > 25 else (6, 4))
+    ax.plot(ks, [a * 100 for a in accs], "o-", lw=1.5, ms=ms, color="#2a6")
+    # mark the closure points (multiples of n_classes) where the ring should peak
+    mults = [k for k in ks if k > 0 and k % n_classes == 0]
+    if mults:
+        ax.plot(mults, [accs[k] * 100 for k in mults], "o", ms=ms + 3,
+                mfc="none", mec="#c33", mew=1.5, label=f"k ≡ 0 (mod {n_classes}) — closure")
     ax.axhline(accs[0] * 100, ls="--", c="gray", lw=1,
                label=f"k=0 anchor (recon, {accs[0]*100:.1f}%)")
-    ax.axhline(100 / 10, ls=":", c="lightgray", lw=1, label="chance (10%)")
+    ax.axhline(100 / n_classes, ls=":", c="lightgray", lw=1, label=f"chance ({100/n_classes:.0f}%)")
+    # adaptive ticks: every 1 when short, else a clean step that lands on multiples of n_classes
+    step = 1 if max_k <= 20 else (n_classes if max_k <= 120 else 2 * n_classes)
+    ax.set_xticks(list(range(0, max_k + 1, step)))
     ax.set_xlabel("k  (operator compositions)")
     ax.set_ylabel("transition accuracy  P(pred = (i+k) mod n)  [%]")
     ax.set_title(f"op^k transition accuracy — {dataset}")
-    ax.set_xticks(ks)
     ax.set_ylim(0, 105)
     ax.legend(loc="lower left", fontsize=8)
     ax.grid(alpha=0.3)
