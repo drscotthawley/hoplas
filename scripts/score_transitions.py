@@ -124,10 +124,10 @@ def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None):
                label=f"k=0 anchor (recon, {accs[0]*100:.1f}%)")
     ax.axhline(100 / n_classes, ls=":", c="lightgray", lw=1, label=f"chance ({100/n_classes:.0f}%)")
     ax.set_ylabel("transition accuracy\nP(pred = (i+k) mod n)  [%]")
-    ax.set_title(f"op^k transition accuracy — {dataset}")
+    title = f"op^k transition accuracy — {dataset}"
     if ckpt_name:
-        ax.text(0.5, 1.01, ckpt_name, transform=ax.transAxes, ha="center", va="bottom",
-                fontsize=9, color="gray", style="italic")
+        title += f"\n{ckpt_name}"
+    ax.set_title(title)
     ax.set_ylim(0, 105)
     ax.legend(loc="lower left", fontsize=8)
     ax.grid(alpha=0.3)
@@ -268,6 +268,90 @@ def _plot_confusion(M, C, C_hat, w, k, n, dataset, ckpt_name, out):
     print(f"  saved plot -> {out}")
 
 
+# ───────────────────────── off-support (NN-distance) probe ─────────────────────────
+# "Does the operator land xproj_t ON the real projected manifold, or in the gaps?"
+# sim-loss (paired MSE) can be low while xproj_t still sits off the real data in
+# directions MSE doesn't penalize — and inv_proj/decoder only work ON the real
+# distribution (proven by the recon path decoding cleanly). So we measure, in
+# PROJECTED space, the distance from each transformed point op^k(proj(x)) to its
+# NEAREST real projected point proj(real); compare to the real set's intrinsic
+# spacing (real→real NN). ratio ≈ 1 → on-manifold; ≫ 1 → off-support (→ garbage decode).
+
+def _nn_dist(A, B, exclude_self=False, chunk=2048):
+    """For each row of A, distance to its nearest row in B. exclude_self skips the
+    aligned index (use when A is B). Chunked over A to bound memory."""
+    out = []
+    for i in range(0, A.shape[0], chunk):
+        a = A[i:i + chunk]
+        d = torch.cdist(a, B)                       # (chunk, |B|)
+        if exclude_self:
+            r = torch.arange(a.shape[0], device=a.device)
+            d[r, i + r] = float("inf")
+        out.append(d.min(dim=1).values)
+    return torch.cat(out)
+
+
+@torch.no_grad()
+def nn_probe(args):
+    proj, trans_op, inv_proj, device, dataset = load_for_inference(args.checkpoint, args.device)
+    vae = load_vae(dataset, device=str(device))
+    loader = _test_loader(dataset, args.n_samples, args.batch_size)
+
+    mus, Ys = [], []
+    for imgs, _ in loader:
+        mu, _ = vae.encoder(imgs.to(device))
+        mus.append(mu)
+        Ys.append(proj(mu))
+    mu_all = torch.cat(mus)            # (N, nd) source latents
+    Y = torch.cat(Ys)                  # (N, pnd) the real projected manifold
+
+    base = _nn_dist(Y, Y, exclude_self=True)        # intrinsic real→real spacing
+    b_med = base.median().item()
+    print(f"\noff-support NN probe  (dataset={dataset}, N={Y.shape[0]}, pnd={Y.shape[1]})")
+    print(f"  baseline real→real NN distance: median={b_med:.4f}  "
+          f"(p10={base.quantile(0.1).item():.4f}, p90={base.quantile(0.9).item():.4f})")
+    print(f"  {'k':>3}  {'med NN':>8}  {'ratio':>6}  {'frac>3×base':>11}")
+    results = {}
+    for k in args.nn_probe:
+        h = proj(mu_all)
+        for _ in range(k):
+            h = trans_op(h)
+        d = _nn_dist(h, Y, exclude_self=False)      # op^k(proj(x)) → nearest real proj
+        med = d.median().item()
+        frac = (d > 3 * b_med).float().mean().item()
+        print(f"  {k:>3}  {med:8.4f}  {med / b_med:6.2f}  {frac*100:10.1f}%")
+        results[k] = d
+    if not args.no_plot:
+        _plot_nn(base, results, b_med, dataset, os.path.basename(args.checkpoint),
+                 args.nn_out or "nn_probe.png")
+
+
+def _plot_nn(base, results, b_med, dataset, ckpt_name, out):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    allvals = [base] + list(results.values())
+    hi = torch.cat(allvals).quantile(0.99).item()
+    bins = np.linspace(0, hi, 60)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.hist(base.cpu().numpy(), bins=bins, density=True, alpha=0.5,
+            color="gray", label=f"real→real (baseline, med={b_med:.3f})")
+    for k, d in results.items():
+        ax.hist(d.cpu().numpy(), bins=bins, density=True, histtype="step", lw=2,
+                label=f"op^{k}(proj x)→real  (med={d.median().item():.3f}, "
+                      f"{d.median().item()/b_med:.1f}×)")
+    ax.axvline(b_med, ls="--", c="gray", lw=1)
+    ax.set_xlabel("nearest-neighbor distance to real projected manifold")
+    ax.set_ylabel("density")
+    ax.set_title(f"off-support probe — {dataset}\n{ckpt_name}", fontsize=10)
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    print(f"\nsaved plot -> {out}")
+
+
 def main():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
                                 description="Score op^k transition accuracy with the pixel classifier.")
@@ -284,9 +368,16 @@ def main():
                         "k=0 is auto-included as the deconvolution kernel. e.g. --confusion-k 76 77 78")
     p.add_argument("--confusion-out", type=str, default=None,
                    help="confusion plot path (default: confusion_k{K}.png per k)")
+    p.add_argument("--nn-probe",     type=int, nargs="+", default=None, metavar="K",
+                   help="off-support probe: NN distance from op^k(proj x) to the real projected "
+                        "manifold vs the real set's intrinsic spacing, at these k (skips the curve). "
+                        "ratio≫1 ⇒ lands off-manifold ⇒ garbage decode despite low sim loss. e.g. --nn-probe 1")
+    p.add_argument("--nn-out",       type=str, default=None, help="off-support plot path (default: nn_probe.png)")
     args = p.parse_args()
     if args.confusion_k:
         confusion_analysis(args)
+    elif args.nn_probe:
+        nn_probe(args)
     else:
         score(args)
 
