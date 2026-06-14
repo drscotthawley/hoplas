@@ -55,7 +55,7 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
                                   diag=args.mom_diag, cov_weight=args.mom_cov_weight, return_stats=True)
         sigreg = SIGReg(torch.cat([xproj_t, yproj], dim=0), global_step=epoch)
         recon = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))
-        loss = (1 - args.lambd) * (args.lambda_sim * sim + mom) + args.lambd * sigreg + args.lambda_recon * recon
+        loss = (1 - args.lambd) * (args.lambda_sim * sim + args.lambda_mom * mom) + args.lambd * sigreg + args.lambda_recon * recon
         bs = xb.size(0)
         tot_loss += loss.item() * bs; tot_sim += sim.item() * bs; tot_mom += mom.item() * bs
         tot_sigreg += sigreg.item() * bs; tot_recon += recon.item() * bs
@@ -159,7 +159,7 @@ def train(args):
                                         diag=args.mom_diag, cov_weight=args.mom_cov_weight)  # match cloud *shape*
                 sigreg_loss = SIGReg( torch.cat([xproj_t, yproj], dim=0), global_step=epoch )  # pull distribution toward Gaussian
                 recon_loss = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))  # inv_proj sees both x and y
-                loss = (1 - args.lambd) * (args.lambda_sim * sim_loss + mom_loss) + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
+                loss = (1 - args.lambd) * (args.lambda_sim * sim_loss + args.lambda_mom * mom_loss) + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
                 loss.backward()
                 optimizer.step()
                 bs = xb.size(0)
@@ -229,8 +229,10 @@ def main():
                    help="SIGReg weight: loss = (1-lambd)*sim + lambd*sigreg")
     p.add_argument("--lambda-recon", type=float, default=1.0,
                    help="Weight on inv_proj autoencoder reconstruction loss (0 disables)")
-    p.add_argument("--lambda-sim", type=float, default=0.1,
-                   help="Weak weight on MSE sim inside the non-sigreg group: (1-lambd)*(lambda_sim*sim + mom)")
+    p.add_argument("--lambda-mom", type=float, default=0.5,
+                   help="Weight on MomMatch inside the non-sigreg group (0 disables; high values can merge classes)")
+    p.add_argument("--lambda-sim", type=float, default=0.5,
+                   help="Weight on MSE sim inside the non-sigreg group: (1-lambd)*(lambda_sim*sim + lambda_mom*mom)")
     p.add_argument("--lr", type=float, default=0.002)
     p.add_argument("--lr-patience", type=int, default=50, help="ReduceLROnPlateau patience (epochs)")
     p.add_argument("--max-viz-points", type=int, default=1000,
