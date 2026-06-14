@@ -78,11 +78,12 @@ def score(args):
         print(f"  {k:>3}  {'(i+%d)%%%d' % (k, n_classes):>8}  {accs[k]*100:6.2f}%{tag}")
 
     if not args.no_plot:
-        _plot(accs, max_k, dataset, args.out, n_classes)
+        ckpt_name = os.path.basename(args.checkpoint)
+        _plot(accs, max_k, dataset, args.out, n_classes, ckpt_name)
     return accs
 
 
-def _plot(accs, max_k, dataset, out, n_classes=10):
+def _plot(accs, max_k, dataset, out, n_classes=10, ckpt_name=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -106,6 +107,9 @@ def _plot(accs, max_k, dataset, out, n_classes=10):
     ax.set_xlabel("k  (operator compositions)")
     ax.set_ylabel("transition accuracy  P(pred = (i+k) mod n)  [%]")
     ax.set_title(f"op^k transition accuracy — {dataset}")
+    if ckpt_name:
+        ax.text(0.5, 1.005, ckpt_name, transform=ax.transAxes, ha="center", va="bottom",
+                fontsize=9, color="gray", style="italic")
     ax.set_ylim(0, 105)
     ax.legend(loc="lower left", fontsize=8)
     ax.grid(alpha=0.3)
