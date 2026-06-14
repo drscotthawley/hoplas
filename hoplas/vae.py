@@ -58,28 +58,18 @@ def _pick_device():
     return "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 
-def load_mnist_vae(device=None):
-    """Return Marco's pretrained MNIST VAE (eval mode, on `device`).
-
-    Has `.encoder` (image -> (mu, logvar)) and `.decoder` (latent -> image).
-    Fetches code/weights on first call and caches them.
-    """
-    import torch
+def _load_mnist_vae(device=None):
     import torch.nn as nn
     import gdown
     from safetensors.torch import load_file
-
     _ensure_marco()
     from marco_submission import InspoResNetVAE
-
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
     if not os.path.exists(_VAE_WEIGHTS_PATH):
         gdown.download(id=_VAE_WEIGHTS_ID, output=_VAE_WEIGHTS_PATH, quiet=False)
-
     vae = InspoResNetVAE(act=nn.GELU, **_VAE_SPEC)
     vae.load_state_dict(load_file(_VAE_WEIGHTS_PATH))
-    device = device or _pick_device()
-    return vae.to(device).eval()
+    return vae
 
 
 # ─── CIFAR-10 β-VAE ───────────────────────────────────────────────────────────
@@ -175,12 +165,22 @@ class CIFARVAE(nn.Module):
         return self.decoder(self.reparameterize(mu, logvar)), mu, logvar
 
 
-def load_cifar_vae(weights_path=None, device=None):
-    """Load the trained CIFAR-10 β-VAE. Run scripts/train_vae.py first to produce weights."""
+def _load_cifar_vae(weights_path=None):
     weights_path = weights_path or _CIFAR_WEIGHTS_PATH
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"{weights_path} not found — run scripts/train_vae.py first")
     ck = torch.load(weights_path, map_location="cpu", weights_only=False)
     vae = CIFARVAE(**ck.get("spec", _CIFAR_VAE_SPEC))
     vae.load_state_dict(ck["state_dict"])
+    return vae
+
+
+def load_vae(dataset, device=None):
+    """Load the pretrained VAE for the given dataset ("mnist" or "cifar"), in eval mode."""
+    if dataset == "mnist":
+        vae = _load_mnist_vae()
+    elif dataset == "cifar":
+        vae = _load_cifar_vae()
+    else:
+        raise ValueError(f"no VAE for dataset: {dataset!r}")
     return vae.to(device or _pick_device()).eval()

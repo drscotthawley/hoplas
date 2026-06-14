@@ -11,12 +11,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from torchvision.utils import make_grid
-from hoplas.data import LineDataset, MNISTEncodingsDataset
+from hoplas.data import LineDataset, EncodingsDataset
 from hoplas.inference import make_class_ordered_images, make_viz_grids
 from hoplas.models import Projector
 from hoplas.ops import OpWrapper
 from hoplas.losses import SIGReg
-from hoplas.vae import load_mnist_vae
+from hoplas.vae import load_vae
 from hoplas.viz import embedding_scatter3d
 
 
@@ -52,12 +52,14 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
 def train(args):
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu") if not args.cpu else torch.device("cpu")
+    _PT_PATHS = {"mnist": "~/datasets/mnist_latents.pt", "cifar": "~/datasets/cifar_latents.pt"}
     if args.dataset == "line":
         dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise)
         val_dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, debug=False, len=5000)
-    else:  # mnist: the encodings dictate nd (overrides --nd)
-        dataset = MNISTEncodingsDataset(split="train")
-        val_dataset = MNISTEncodingsDataset(split="test", debug=False)
+    else:
+        pt = _PT_PATHS[args.dataset]
+        dataset = EncodingsDataset(pt_path=pt, split="train")
+        val_dataset = EncodingsDataset(pt_path=pt, split="test", debug=False)
         args.nd = dataset.nd
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
@@ -66,7 +68,7 @@ def train(args):
     run_name = f"{args.op}_{args.order}" if args.op == "ph" else args.op
     run_name = f"{args.dataset}_{run_name}"
     run_name = f"{run_name}_{args.tag}" if args.tag else run_name
-    project = "ring" if args.dataset == "line" else f"ring-{args.dataset}"
+    project = {"line": "ring", "mnist": "ring-mnist", "cifar": "ring-cifar"}[args.dataset]
     if not args.no_wandb:
         wandb.init(project=project, name=run_name, config=vars(args))
 
@@ -101,11 +103,11 @@ def train(args):
     sim_fn = nn.MSELoss()
     sim_ema = None  # smoothed sim for the scheduler (sigreg flattens, so don't anneal on total)
 
-    # load VAE + cache test grid once for periodic inference viz (mnist only)
+    # load VAE + cache test grid once for periodic inference viz
     vae, viz_imgs = None, None
-    if args.dataset == "mnist" and args.inf_every > 0 and wandb.run is not None:
-        vae = load_mnist_vae(device=str(device))
-        viz_imgs = make_class_ordered_images().to(device)
+    if args.dataset in ("mnist", "cifar") and args.inf_every > 0 and wandb.run is not None:
+        vae = load_vae(args.dataset, device=str(device))
+        viz_imgs = make_class_ordered_images(dataset=args.dataset).to(device)
 
     os.makedirs("checkpoints", exist_ok=True)
     ckpt_path = os.path.join("checkpoints", f"{run_name}.pt")
@@ -170,7 +172,7 @@ def train(args):
                     imgs_in, imgs_recon, imgs_xform = make_viz_grids(vae, proj, trans_op, inv_proj, viz_imgs)
                     for m in (proj, trans_op, inv_proj): m.train()
                     def _wimg(t): return wandb.Image(make_grid(t, nrow=10).permute(1,2,0).numpy())
-                    log.update({"mnist_input": _wimg(imgs_in), "mnist_recon": _wimg(imgs_recon), "mnist_transformed": _wimg(imgs_xform)})
+                    log.update({f"{args.dataset}_input": _wimg(imgs_in), f"{args.dataset}_recon": _wimg(imgs_recon), f"{args.dataset}_transformed": _wimg(imgs_xform)})
                 wandb.log(log)
     except KeyboardInterrupt:
         print("\ninterrupted — finishing run")
@@ -184,8 +186,8 @@ def main():
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--config", is_config_file=True, help="path to a config file (keys = dest names with underscores)")
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
-    p.add_argument("--dataset", choices=["line", "mnist"], default="line",
-                   help="line=synthetic ring; mnist=VAE encodings (nd forced to 16)")
+    p.add_argument("--dataset", choices=["line", "mnist", "cifar"], default="line",
+                   help="line=synthetic ring; mnist/cifar=VAE encodings (nd forced by dataset)")
     p.add_argument("--epochs", type=int, default=1000)
     p.add_argument("--inf-every", type=int, default=20,
                    help="Log MNIST inference grids to W&B every N epochs (0 disables; mnist only)")

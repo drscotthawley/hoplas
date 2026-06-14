@@ -14,16 +14,17 @@ import os
 
 import torch
 import torch.nn.functional as F
-from torchvision.datasets import MNIST
+from torchvision.datasets import CIFAR10, MNIST
 from torchvision.transforms import ToTensor
 from torchvision.utils import make_grid, save_image
 
 from hoplas.models import Projector
 from hoplas.ops import OpWrapper
-from hoplas.vae import load_mnist_vae
+from hoplas.vae import load_vae
 
 
 _MNIST_ROOT = os.path.expanduser("~/datasets/mnist")
+_CIFAR_ROOT = os.path.expanduser("~/datasets/cifar10")
 
 
 def load_for_inference(ckpt_path, device=None):
@@ -40,29 +41,30 @@ def load_for_inference(ckpt_path, device=None):
     inv_proj.load_state_dict(ck["inv_proj"])
     for m in (proj, trans_op, inv_proj): m.to(device).eval()
     print(f"loaded checkpoint: epoch={ck['epoch']}  val_sim_loss={ck['val_sim_loss']:.6f}  op={a['op']}  nd={a['nd']}")
-    return proj, trans_op, inv_proj, device
+    return proj, trans_op, inv_proj, device, a["dataset"]
 
 
-def make_class_ordered_images(n_per_class=10):
-    """Return (100, 1, 28, 28) MNIST test images: column c = digit c, n_per_class rows.
+def make_class_ordered_images(dataset="mnist", n_per_class=10):
+    """Return (100, C, H, W) test images ordered row-major: column c = class c.
 
-    make_grid with nrow=n_classes produces a grid where each column is one digit.
-    Ordering: row-major, so the batch is [row0_digit0, row0_digit1, ..., row0_digit9,
-                                           row1_digit0, ...].
+    make_grid(result, nrow=10) gives one column per class.
+    dataset: "mnist" -> (1,28,28) grayscale; "cifar" -> (3,32,32) RGB.
     """
     n_classes = 10
-    ds = MNIST(root=_MNIST_ROOT, train=False, download=True, transform=ToTensor())
-    # collect indices per class
+    if dataset == "mnist":
+        ds = MNIST(root=_MNIST_ROOT, train=False, download=True, transform=ToTensor())
+    elif dataset == "cifar":
+        ds = CIFAR10(root=_CIFAR_ROOT, train=False, download=True, transform=ToTensor())
+    else:
+        raise ValueError(f"unknown dataset: {dataset!r}")
     buckets = [[] for _ in range(n_classes)]
     for idx, (_, label) in enumerate(ds):
         if len(buckets[label]) < n_per_class:
             buckets[label].append(idx)
         if all(len(b) == n_per_class for b in buckets):
             break
-    # interleave: row-major so make_grid(nrow=n_classes) gives one column per digit
-    ordered_indices = [buckets[c][r] for r in range(n_per_class) for c in range(n_classes)]
-    imgs = torch.stack([ds[i][0] for i in ordered_indices])   # (100, 1, 28, 28)
-    return imgs
+    ordered = [buckets[c][r] for r in range(n_per_class) for c in range(n_classes)]
+    return torch.stack([ds[i][0] for i in ordered])
 
 
 @torch.no_grad()
@@ -85,10 +87,9 @@ def make_viz_grids(vae, proj, trans_op, inv_proj, imgs):
 @torch.no_grad()
 def run_demo(ckpt_path, out_dir=".", n_per_class=10, device=None):
     """Full pipeline: load checkpoint, encode MNIST grid, transform, decode, save PNGs."""
-    proj, trans_op, inv_proj, device = load_for_inference(ckpt_path, device)
-    vae = load_mnist_vae(device=str(device))
-
-    imgs = make_class_ordered_images(n_per_class).to(device)   # (100, 1, 28, 28)
+    proj, trans_op, inv_proj, device, dataset = load_for_inference(ckpt_path, device)
+    vae = load_vae(dataset, device=str(device))
+    imgs = make_class_ordered_images(dataset, n_per_class).to(device)
 
     imgs_input, imgs_recon, imgs_xform = make_viz_grids(vae, proj, trans_op, inv_proj, imgs)
 
