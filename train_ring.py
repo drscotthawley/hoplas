@@ -126,7 +126,7 @@ def train(args):
         {"params": op_nodecay,   "weight_decay": 0.0,             "lr": op_lr},
     ], lr=args.lr)
     plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=args.lr_patience, min_lr=args.lr / 50)
+        optimizer, mode="min", factor=0.5, patience=args.lr_patience, min_lr=args.lr / 20)
     warmup = (torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=args.warmup_start_lr / args.lr, total_iters=args.warmup)
         if args.warmup > 0 else None)  # constructing this immediately scales optimizer LRs down to the start
