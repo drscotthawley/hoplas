@@ -53,6 +53,17 @@ def _test_loader(dataset, n_samples, batch_size):
     return DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=4)
 
 
+def _effective_n(counts):
+    """Effective number of predicted classes = exp(entropy) of the pred histogram.
+    n_classes = perfectly uniform output; →1 = collapsed onto a single class."""
+    p = np.asarray(counts, dtype=float)
+    s = p.sum()
+    if s == 0:
+        return 0.0
+    p = p[p > 0] / s
+    return float(np.exp(-(p * np.log(p)).sum()))
+
+
 @torch.no_grad()
 def score(args):
     proj, trans_op, inv_proj, device, dataset = load_for_inference(args.checkpoint, args.device)
@@ -64,32 +75,34 @@ def score(args):
     max_k = args.max_k if args.max_k is not None else n_classes
     loader = _test_loader(dataset, args.n_samples, args.batch_size)
 
-    # accumulate correct/total per k across batches
+    # accumulate correct/total and the pred-class histogram per k across batches
     correct = {k: 0 for k in range(max_k + 1)}
+    pred_hist = {k: np.zeros(n_classes) for k in range(max_k + 1)}
     total = 0
     for imgs, labels in loader:
-        imgs = imgs.to(device)
-        mu, _ = vae.encoder(imgs)
+        mu, _ = vae.encoder(imgs.to(device))
         for k in range(max_k + 1):
             acc_k, preds, targets = transition_accuracy(
                 vae, proj, trans_op, inv_proj, classifier, mu, labels, k, n_classes)
             correct[k] += int((preds == targets).sum().item())
+            np.add.at(pred_hist[k], preds.cpu().numpy(), 1)
         total += labels.size(0)
 
     accs = [correct[k] / total for k in range(max_k + 1)]
+    eff = [_effective_n(pred_hist[k]) for k in range(max_k + 1)]    # output diversity vs k
     print(f"\nop^k transition accuracy  (n={total}, dataset={dataset})")
-    print(f"  {'k':>3}  {'target':>6}  {'acc':>7}")
+    print(f"  {'k':>3}  {'target':>8}  {'acc':>7}  {'eff#cls':>7}")
     for k in range(max_k + 1):
         tag = " (recon)" if k == 0 else ""
-        print(f"  {k:>3}  {'(i+%d)%%%d' % (k, n_classes):>8}  {accs[k]*100:6.2f}%{tag}")
+        print(f"  {k:>3}  {'(i+%d)%%%d' % (k, n_classes):>8}  {accs[k]*100:6.2f}%  {eff[k]:7.2f}{tag}")
 
     if not args.no_plot:
         ckpt_name = os.path.basename(args.checkpoint)
-        _plot(accs, max_k, dataset, args.out, n_classes, ckpt_name)
-    return accs
+        _plot(accs, eff, max_k, dataset, args.out, n_classes, ckpt_name)
+    return accs, eff
 
 
-def _plot(accs, max_k, dataset, out, n_classes=10, ckpt_name=None):
+def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -97,9 +110,12 @@ def _plot(accs, max_k, dataset, out, n_classes=10, ckpt_name=None):
     ks = list(range(max_k + 1))
     # shrink markers as the curve gets long so points don't merge into a blob
     ms = 7 if max_k <= 25 else (4 if max_k <= 60 else 3)
-    fig, ax = plt.subplots(figsize=(8, 4) if max_k > 25 else (6, 4))
+    fig, (ax, axd) = plt.subplots(
+        2, 1, sharex=True, gridspec_kw={"height_ratios": [2, 1]},
+        figsize=(8, 6.5) if max_k > 25 else (6, 6))
+
+    # ── accuracy panel ──
     ax.plot(ks, [a * 100 for a in accs], "o-", lw=1.5, ms=ms, color="#2a6")
-    # mark the closure points (multiples of n_classes) where the ring should peak
     mults = [k for k in ks if k > 0 and k % n_classes == 0]
     if mults:
         ax.plot(mults, [accs[k] * 100 for k in mults], "o", ms=ms + 3,
@@ -107,18 +123,28 @@ def _plot(accs, max_k, dataset, out, n_classes=10, ckpt_name=None):
     ax.axhline(accs[0] * 100, ls="--", c="gray", lw=1,
                label=f"k=0 anchor (recon, {accs[0]*100:.1f}%)")
     ax.axhline(100 / n_classes, ls=":", c="lightgray", lw=1, label=f"chance ({100/n_classes:.0f}%)")
-    # adaptive ticks: every 1 when short, else a clean step that lands on multiples of n_classes
-    step = 1 if max_k <= 20 else (n_classes if max_k <= 120 else 2 * n_classes)
-    ax.set_xticks(list(range(0, max_k + 1, step)))
-    ax.set_xlabel("k  (operator compositions)")
-    ax.set_ylabel("transition accuracy  P(pred = (i+k) mod n)  [%]")
+    ax.set_ylabel("transition accuracy\nP(pred = (i+k) mod n)  [%]")
     ax.set_title(f"op^k transition accuracy — {dataset}")
     if ckpt_name:
-        ax.text(0.5, 1.005, ckpt_name, transform=ax.transAxes, ha="center", va="bottom",
+        ax.text(0.5, 1.01, ckpt_name, transform=ax.transAxes, ha="center", va="bottom",
                 fontsize=9, color="gray", style="italic")
     ax.set_ylim(0, 105)
     ax.legend(loc="lower left", fontsize=8)
     ax.grid(alpha=0.3)
+
+    # ── output-diversity panel (collapse detector) ──
+    axd.plot(ks, eff, "s-", lw=1.5, ms=ms, color="#36c")
+    axd.axhline(n_classes, ls=":", c="lightgray", lw=1, label=f"uniform ({n_classes})")
+    axd.axhline(1, ls=":", c="lightgray", lw=1, label="collapsed (1)")
+    axd.set_ylabel("output diversity\n(eff. # classes)")
+    axd.set_xlabel("k  (operator compositions)")
+    axd.set_ylim(0, n_classes + 0.5)
+    axd.legend(loc="lower left", fontsize=8)
+    axd.grid(alpha=0.3)
+    # adaptive ticks: every 1 when short, else a clean step landing on multiples of n_classes
+    step = 1 if max_k <= 20 else (n_classes if max_k <= 120 else 2 * n_classes)
+    axd.set_xticks(list(range(0, max_k + 1, step)))
+
     fig.tight_layout()
     fig.savefig(out, dpi=150)
     print(f"\nsaved plot -> {out}")
@@ -203,6 +229,11 @@ def confusion_analysis(args):
         print(f"  peak displacement d*={d_star}   target-for-this-k = {k % n}   "
               f"w-entropy={ent:.3f} nats (0=sharp, ln{n}={np.log(n):.2f}=uniform)   "
               f"deconv residual={resid*100:.1f}%")
+        marg = counts[k].sum(0).astype(float); marg = marg / marg.sum()
+        eff_k = _effective_n(counts[k].sum(0))
+        top = np.argsort(marg)[::-1][:3]
+        print(f"  output diversity: eff #classes = {eff_k:.2f} / {n}   "
+              f"most-predicted: " + ", ".join(f"{c}:{marg[c]*100:.0f}%" for c in top))
         sharp = "SHARP -> operator has a definite displacement; spread in C_k is the JUDGE" if ent < 0.5 * np.log(n) \
                 else "BROAD -> operator genuinely SCATTERED points (not just confusion)"
         print(f"  verdict: {sharp}")
