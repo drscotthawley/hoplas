@@ -96,6 +96,24 @@ def make_viz_grids(vae, proj, trans_op, inv_proj, imgs, repeat=1):
 
 
 @torch.no_grad()
+def transition_accuracy(vae, proj, trans_op, inv_proj, classifier, mu, labels, k, n_classes=10):
+    """Apply op^k in latent space, decode, classify; score against the shifted label.
+
+    mu:     (B, nd) encoded latents (use the encoder mean, not a sample)
+    labels: (B,) true source classes
+    k:      number of times to compose the operator (k=0 = recon path, no op)
+    Returns (frac_correct, preds, targets) where targets = (labels + k) % n_classes.
+    The fraction is the op^k transition accuracy: did composing the op k times
+    advance the class k steps? (k=0 anchors pipeline fidelity vs the classifier ceiling.)
+    """
+    z = apply_operation(mu, proj, trans_op, inv_proj, repeat=k)
+    decoded = vae.decoder(z).clamp(0, 1)
+    preds = classifier(decoded).argmax(1)
+    targets = (labels.to(preds.device) + k) % n_classes
+    return (preds == targets).float().mean().item(), preds, targets
+
+
+@torch.no_grad()
 def run_demo(ckpt_path, out_dir=".", n_per_class=10, device=None):
     """Full pipeline: load checkpoint, encode MNIST grid, transform, decode, save PNGs."""
     proj, trans_op, inv_proj, device, dataset = load_for_inference(ckpt_path, device)
