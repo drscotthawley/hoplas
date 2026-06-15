@@ -22,7 +22,7 @@ REMOTE_REPO="${HOPLAS_REMOTE_REPO:-~/github/hoplas}"
 REMOTE_ENV="${HOPLAS_REMOTE_ENV:-~/envs/hoplas}"
 
 # Build queue from configs dir
-mapfile -t QUEUE < <(ls "${REPO_DIR}"/configs/mnist_*.cfg 2>/dev/null | xargs -n1 basename | sed 's/\.cfg$//')
+QUEUE=($(ls "${REPO_DIR}"/configs/mnist_*.cfg 2>/dev/null | xargs -n1 basename | sed 's/\.cfg$//'))
 [[ ${#QUEUE[@]} -eq 0 ]] && { echo "No configs/mnist_*.cfg found."; exit 1; }
 
 echo "Queue (${#QUEUE[@]} configs): ${QUEUE[*]}"
