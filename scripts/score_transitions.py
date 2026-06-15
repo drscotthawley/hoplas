@@ -98,7 +98,9 @@ def score(args):
 
     if not args.no_plot:
         ckpt_name = os.path.basename(args.checkpoint)
-        _plot(accs, eff, max_k, dataset, args.out, n_classes, ckpt_name)
+        stem = os.path.splitext(ckpt_name)[0]
+        out = args.out or f"op_k_{stem}.png"
+        _plot(accs, eff, max_k, dataset, out, n_classes, ckpt_name)
     return accs, eff
 
 
@@ -360,7 +362,7 @@ def main():
     p.add_argument("--n-classes",    type=int, default=10,   help="number of classes (ring size)")
     p.add_argument("--n-samples",    type=int, default=5000, help="test images to score (0 = full test set)")
     p.add_argument("--batch-size",   type=int, default=512,  help="eval batch size")
-    p.add_argument("--out",          type=str, default="op_k_transition.png", help="output plot path (transition curve)")
+    p.add_argument("--out",          type=str, default=None, help="output plot path (default: op_k_<checkpoint>.png)")
     p.add_argument("--no-plot",      action="store_true",    help="skip plotting, print tables only")
     p.add_argument("--device",       type=str, default=None, help="cuda/mps/cpu (default: auto)")
     p.add_argument("--confusion-k",  type=int, nargs="+", default=None, metavar="K",
