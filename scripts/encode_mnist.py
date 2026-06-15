@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
 from torchvision.transforms import ToTensor
 
-from hoplas.vae import load_mnist_vae   # fetches third-party VAE code + weights on first use
+from hoplas.vae import load_vae
 
 
 @torch.no_grad()
@@ -57,7 +57,7 @@ if __name__ == "__main__":
     # Encode the dataset - just a single file is sufficient
     latent_data_filename = os.path.expanduser('~/datasets/mnist_latents.pt')
     if not os.path.exists(latent_data_filename):
-        vae = load_mnist_vae()
+        vae = load_vae("mnist")
         encode_mnist(vae, filename=latent_data_filename)
     else:
         print(f"{latent_data_filename} already exists; nothing to do.")
