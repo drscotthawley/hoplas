@@ -232,7 +232,7 @@ def train(args):
 
 def main():
     p = configargparse.ArgumentParser(description="Ring task with different model variants.")
-    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--batch-size", type=int, default=1024)
     p.add_argument("--config", is_config_file=True, help="path to a config file (keys = dest names with underscores)")
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
     p.add_argument("--dataset", choices=["line", "mnist", "cifar"], default="line",
