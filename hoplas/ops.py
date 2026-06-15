@@ -28,6 +28,10 @@ class OpWrapper(nn.Module):
             if nd % order != 0:
                 raise ValueError(f"nd={nd} must be divisible by order={order} for PHMLinear")
             self.op = PHMLinear(n=order, in_features=nd, out_features=nd)
+        elif method == "quat":
+            if nd % 4 != 0:
+                raise ValueError(f"nd={nd} must be divisible by 4 for frozen quaternion")
+            self.op = PHMLinear(n=4, in_features=nd, out_features=nd)
         else:
             raise ValueError(f"Unknown method: {method}")
 

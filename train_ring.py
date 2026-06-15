@@ -16,6 +16,19 @@ from hoplas.inference import make_class_ordered_images, make_viz_grids
 from hoplas.models import Projector
 from hoplas.ops import OpWrapper
 from hoplas.losses import SIGReg, MomMatchLoss
+
+
+def freeze_quaternion(ph_layer):
+    """Fix ph_layer.a to the Hamilton quaternion multiplication table and freeze it."""
+    assert ph_layer.n == 4, "freeze_quaternion requires --order 4"
+    H = torch.tensor([
+        [[ 1,  0,  0,  0], [ 0, -1,  0,  0], [ 0,  0, -1,  0], [ 0,  0,  0, -1]],
+        [[ 0,  1,  0,  0], [ 1,  0,  0,  0], [ 0,  0,  0, -1], [ 0,  0,  1,  0]],
+        [[ 0,  0,  1,  0], [ 0,  0,  0,  1], [ 1,  0,  0,  0], [ 0, -1,  0,  0]],
+        [[ 0,  0,  0,  1], [ 0,  0, -1,  0], [ 0,  1,  0,  0], [ 1,  0,  0,  0]],
+    ], dtype=ph_layer.a.dtype, device=ph_layer.a.device)
+    ph_layer.a.data.copy_(H)
+    ph_layer.a.requires_grad_(False)
 from hoplas.vae import load_vae
 from hoplas.viz import embedding_scatter3d
 
@@ -89,7 +102,7 @@ def train(args):
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
     print(f"device={device}  op={args.op}  dataset={args.dataset}  nd={args.nd}  pnd={args.pnd}")
 
-    run_name = f"{args.op}_{args.order}" if args.op == "ph" else args.op
+    run_name = f"{args.op}_{args.order}" if args.op in ("ph", "quat") else args.op
     run_name = f"{args.dataset}_{run_name}"
     run_name = f"{run_name}_{args.tag}" if args.tag else run_name
     project = {"line": "ring", "mnist": "ring-mnist", "cifar": "ring-cifar"}[args.dataset]
@@ -101,6 +114,8 @@ def train(args):
 
     proj = Projector(nd=args.nd, pnd=args.pnd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=args.unit_norm).to(device)
     trans_op = OpWrapper(args.op, args.pnd, args.order, args.op_resid, args.rank, args.unit_norm).to(device)
+    if args.op == "quat":
+        freeze_quaternion(trans_op.op)
     # inverse projector: maps pnd back to nd (unit_norm=False: output isn't on the sphere)
     inv_proj = Projector(nd=args.pnd, pnd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, unit_norm=False).to(device)
 
@@ -246,7 +261,7 @@ def main():
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--noise", type=float, default=0.01, help="Jitter added to each point")
     p.add_argument("--npoints", type=int, default=12, help="Number of quantized points on the line")
-    p.add_argument("--op", choices=["filmr", "filmr_expm", "matop", "matop2", "ph"], default="filmr_expm")
+    p.add_argument("--op", choices=["filmr", "filmr_expm", "matop", "matop2", "ph", "quat"], default="filmr_expm")
     p.add_argument("--op-lr", type=float, default=None,
                    help="Separate LR for trans_op (default: same as --lr). Lower it to slow the angle's climb.")
     p.add_argument("--op-resid", action=argparse.BooleanOptionalAction, default=True,
