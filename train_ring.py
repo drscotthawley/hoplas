@@ -194,7 +194,7 @@ def train(args):
                     val_loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args,
                     max_viz=args.max_viz_points)
                 print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  mom={val_mom:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}  var(xt/y)={val_vars['var_xproj_t']:.4f}/{val_vars['var_yproj']:.4f}")
-                if val_sim < best_val:
+                if val_sim < best_val and epoch >= args.min_ckpt_epoch:
                     best_val = val_sim
                     torch.save({"epoch": epoch, "val_sim_loss": val_sim, "args": vars(args),
                                 "proj": proj.state_dict(), "inv_proj": inv_proj.state_dict(),
@@ -238,6 +238,8 @@ def main():
     p.add_argument("--dataset", choices=["line", "mnist", "cifar"], default="line",
                    help="line=synthetic ring; mnist/cifar=VAE encodings (nd forced by dataset)")
     p.add_argument("--epochs", type=int, default=1000)
+    p.add_argument("--min-ckpt-epoch", type=int, default=20,
+                   help="Don't save checkpoints before this epoch (avoids locking in spuriously low early loss)")
     p.add_argument("--inf-every", type=int, default=20,
                    help="Log MNIST inference grids to W&B every N epochs (0 disables; mnist only)")
     p.add_argument("--lambd", type=float, default=0.01,
