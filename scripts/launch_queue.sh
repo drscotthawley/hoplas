@@ -9,6 +9,28 @@
 #   ./scripts/launch_queue.sh lecun              # all configs/mnist_*.cfg, 2 parallel, GPU 0
 #   ./scripts/launch_queue.sh lecun 2 0 configs/mnist_filmr_expm_rank*.cfg
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    cat << 'EOF'
+Usage: ./scripts/launch_queue.sh <host> [max_parallel] [gpu_id] [config_files...]
+
+Arguments:
+  host           SSH hostname to run on (e.g. lecun)
+  max_parallel   Max simultaneous training runs (default: 2)
+  gpu_id         CUDA_VISIBLE_DEVICES value (default: 0)
+  config_files   Config file(s) to run (default: all configs/mnist_*.cfg)
+                 Globs are fine: configs/mnist_ph*.cfg
+
+Environment variables:
+  HOPLAS_REMOTE_REPO   Path to repo on remote host (default: ~/github/hoplas)
+  HOPLAS_REMOTE_ENV    Path to venv on remote host  (default: ~/envs/hoplas)
+
+Examples:
+  ./scripts/launch_queue.sh lecun
+  ./scripts/launch_queue.sh lecun 3 1 configs/mnist_ph*.cfg
+EOF
+    exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 

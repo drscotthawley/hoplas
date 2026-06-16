@@ -222,7 +222,7 @@ def _plot_multi(results, max_k, dataset, out, n_classes=10, progress="", legend_
     import matplotlib.pyplot as plt
 
     OP_COLORS = {
-        "ph_2": "#08519c", "ph_4": "#00897b", "ph_8": "#80cbc4",
+        "ph_2": "#08519c", "ph_4": "#00897b", "ph_8": "#80cbc4", "ph_16": "#b2dfdb",
         "quat_4": "#1a7a1a", "quat": "#1a7a1a",
         "kquat_4": "#74c476", "kquat": "#74c476",
         "kdualquat": "#c7e9c0",
