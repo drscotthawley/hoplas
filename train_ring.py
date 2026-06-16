@@ -103,6 +103,8 @@ def train(args):
     print(f"device={device}  op={args.op}  dataset={args.dataset}  nd={args.nd}  pnd={args.pnd}")
 
     run_name = f"{args.op}_{args.order}" if args.op in ("ph", "quat") else args.op
+    if args.op in ("filmr_expm", "filmr") and args.rank != 2:
+        run_name = f"{args.op}_{args.rank}"
     run_name = f"{args.dataset}_{run_name}"
     run_name = f"{run_name}_{args.tag}" if args.tag else run_name
     project = {"line": "ring", "mnist": "ring-mnist", "cifar": "ring-cifar"}[args.dataset]
