@@ -85,7 +85,7 @@ def _build_mu_cache(checkpoint, args):
 def score_one(checkpoint, args, mu_cache, vae, classifier, dataset, device, progress=""):
     """Score a single checkpoint using pre-encoded mu_cache; return (accs, eff)."""
     if progress:
-        print(f"\n{progress}")
+        print(f"\n{progress} {os.path.basename(checkpoint)}")
     proj, trans_op, inv_proj, dev2, _ = load_for_inference(checkpoint, args.device)
 
     n_classes = args.n_classes
