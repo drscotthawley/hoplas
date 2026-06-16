@@ -25,6 +25,7 @@ dependencies = [
     "safetensors",
     "gdown==5.2.0",
     "configargparse",
+    "kingdon",
 ]
 
 [project.optional-dependencies]
