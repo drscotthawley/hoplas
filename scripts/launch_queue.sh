@@ -11,12 +11,12 @@
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     cat << 'EOF'
-Usage: ./scripts/launch_queue.sh <host> [max_parallel] [gpu_id] [config_files...]
+Usage: ./scripts/launch_queue.sh <host> [--par N] [--gpu ID] [config_files...]
 
 Arguments:
   host           SSH hostname to run on (e.g. lecun)
-  max_parallel   Max simultaneous training runs (default: 2)
-  gpu_id         CUDA_VISIBLE_DEVICES value (default: 0)
+  --par N        Max simultaneous training runs (default: 2)
+  --gpu ID       CUDA_VISIBLE_DEVICES value (default: 0)
   config_files   Config file(s) to run (default: all configs/mnist_*.cfg)
                  Globs are fine: configs/mnist_ph*.cfg
 
@@ -26,7 +26,8 @@ Environment variables:
 
 Examples:
   ./scripts/launch_queue.sh lecun
-  ./scripts/launch_queue.sh lecun 3 1 configs/mnist_ph*.cfg
+  ./scripts/launch_queue.sh lecun --par 3 --gpu 1 configs/mnist_ph*.cfg
+  ./scripts/launch_queue.sh lecun configs/mnist_ph_16_no*.cfg
 EOF
     exit 0
 fi
@@ -34,10 +35,18 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
-HOST="${1:?Usage: $0 <host> [max_parallel] [gpu_id] [config_files...]}"
-MAX_PAR="${2:-2}"
-GPU="${3:-0}"
-shift 3 2>/dev/null || shift $#   # remaining args are optional config files
+HOST="${1:?Usage: $0 <host> [--par N] [--gpu ID] [config_files...]}"
+shift
+MAX_PAR=2
+GPU=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --par) MAX_PAR="$2"; shift 2 ;;
+        --gpu) GPU="$2";     shift 2 ;;
+        *)     break ;;
+    esac
+done
+# remaining args are optional config files
 POLL_INTERVAL=60   # seconds between status checks
 LAUNCH_GRACE=10    # seconds to wait after launch before polling
 
