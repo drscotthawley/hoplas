@@ -119,22 +119,24 @@ def score(args):
     mu_cache, vae, classifier, dataset, device = _build_mu_cache(checkpoints[0], args)
 
     results = []
-    for ckpt in checkpoints:
+    n_ckpts = len(checkpoints)
+    for idx, ckpt in enumerate(checkpoints, 1):
         accs, eff = score_one(ckpt, args, mu_cache, vae, classifier, dataset, device)
         label = os.path.splitext(os.path.basename(ckpt))[0]
         results.append((label, accs, eff))
 
         if not args.no_plot:
+            progress = f"[{idx}/{n_ckpts}]"
             if len(results) == 1 and len(checkpoints) == 1:
                 out = args.out or f"op_k_{label}.png"
-                _plot(accs, eff, max_k, dataset, out, n_classes, label + ".pt")
+                _plot(accs, eff, max_k, dataset, out, n_classes, label + ".pt", progress=progress)
             else:
                 out = args.out or "op_k_comparison.png"
-                _plot_multi(results, max_k, dataset, out, n_classes)
+                _plot_multi(results, max_k, dataset, out, n_classes, progress=progress)
     return results
 
 
-def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None):
+def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None, progress=""):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -179,7 +181,8 @@ def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None):
 
     fig.tight_layout()
     fig.savefig(out, dpi=150)
-    print(f"\nsaved plot -> {out}")
+    prefix = f"{progress} " if progress else ""
+    print(f"\n{prefix}saved plot -> {out}")
 
 
 def _parse_label(label):
@@ -198,7 +201,7 @@ def _parse_label(label):
     return "other", is_norm, s
 
 
-def _plot_multi(results, max_k, dataset, out, n_classes=10):
+def _plot_multi(results, max_k, dataset, out, n_classes=10, progress=""):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
