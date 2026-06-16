@@ -126,12 +126,16 @@ def score(args):
         progress = f"[{idx}/{n_ckpts}]"
         label = os.path.splitext(os.path.basename(ckpt))[0]
         csv_path = f"op_k_{label}.csv"
-        if not args.no_cache and os.path.exists(csv_path):
+        csv_stale = (os.path.exists(csv_path) and os.path.exists(ckpt)
+                     and os.path.getmtime(ckpt) > os.path.getmtime(csv_path))
+        if not args.no_cache and os.path.exists(csv_path) and not csv_stale:
             print(f"\n{progress} {os.path.basename(ckpt)}  (loading cached {csv_path})")
             data = np.loadtxt(csv_path, delimiter=",", skiprows=1)
             accs = list(data[:, 1])
             eff  = list(data[:, 2])
         else:
+            if csv_stale:
+                print(f"\n{progress} {os.path.basename(ckpt)}  (checkpoint newer than cache, recomputing)")
             if mu_cache is None:
                 mu_cache, vae, classifier, dataset, device = _build_mu_cache(checkpoints[0], args)
             accs, eff = score_one(ckpt, args, mu_cache, vae, classifier, dataset, device, progress=progress)
