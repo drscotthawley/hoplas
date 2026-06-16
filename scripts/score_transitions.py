@@ -65,8 +65,9 @@ def _effective_n(counts):
 
 
 @torch.no_grad()
-def score(args):
-    proj, trans_op, inv_proj, device, dataset = load_for_inference(args.checkpoint, args.device)
+def score_one(checkpoint, args):
+    """Score a single checkpoint; return (accs, eff, dataset) without plotting."""
+    proj, trans_op, inv_proj, device, dataset = load_for_inference(checkpoint, args.device)
     vae = load_vae(dataset, device=str(device))
     clf_key = "cifar10" if dataset.startswith("cifar") else "mnist"
     classifier = load_classifier(clf_key, device=str(device))
@@ -75,7 +76,6 @@ def score(args):
     max_k = args.max_k if args.max_k is not None else n_classes
     loader = _test_loader(dataset, args.n_samples, args.batch_size)
 
-    # accumulate correct/total and the pred-class histogram per k across batches
     correct = {k: 0 for k in range(max_k + 1)}
     pred_hist = {k: np.zeros(n_classes) for k in range(max_k + 1)}
     total = 0
@@ -89,19 +89,38 @@ def score(args):
         total += labels.size(0)
 
     accs = [correct[k] / total for k in range(max_k + 1)]
-    eff = [_effective_n(pred_hist[k]) for k in range(max_k + 1)]    # output diversity vs k
-    print(f"\nop^k transition accuracy  (n={total}, dataset={dataset})")
+    eff = [_effective_n(pred_hist[k]) for k in range(max_k + 1)]
+    print(f"\nop^k transition accuracy  [{os.path.basename(checkpoint)}]  (n={total})")
     print(f"  {'k':>3}  {'target':>8}  {'acc':>7}  {'eff#cls':>7}")
     for k in range(max_k + 1):
         tag = " (recon)" if k == 0 else ""
         print(f"  {k:>3}  {'(i+%d)%%%d' % (k, n_classes):>8}  {accs[k]*100:6.2f}%  {eff[k]:7.2f}{tag}")
+    return accs, eff, dataset
+
+
+def score(args):
+    """Score one or more checkpoints; plot single or multi-model comparison."""
+    checkpoints = args.checkpoint
+    n_classes = args.n_classes
+    max_k = args.max_k if args.max_k is not None else n_classes
+
+    results = []
+    dataset = None
+    for ckpt in checkpoints:
+        accs, eff, ds = score_one(ckpt, args)
+        label = os.path.splitext(os.path.basename(ckpt))[0]
+        results.append((label, accs, eff))
+        dataset = ds
 
     if not args.no_plot:
-        ckpt_name = os.path.basename(args.checkpoint)
-        stem = os.path.splitext(ckpt_name)[0]
-        out = args.out or f"op_k_{stem}.png"
-        _plot(accs, eff, max_k, dataset, out, n_classes, ckpt_name)
-    return accs, eff
+        if len(results) == 1:
+            label, accs, eff = results[0]
+            out = args.out or f"op_k_{label}.png"
+            _plot(accs, eff, max_k, dataset, out, n_classes, label + ".pt")
+        else:
+            out = args.out or "op_k_comparison.png"
+            _plot_multi(results, max_k, dataset, out, n_classes)
+    return results
 
 
 def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None):
@@ -144,6 +163,49 @@ def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None):
     axd.legend(loc="lower left", fontsize=8)
     axd.grid(alpha=0.3)
     # adaptive ticks: every 1 when short, else a clean step landing on multiples of n_classes
+    step = 1 if max_k <= 20 else (n_classes if max_k <= 120 else 2 * n_classes)
+    axd.set_xticks(list(range(0, max_k + 1, step)))
+
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    print(f"\nsaved plot -> {out}")
+
+
+def _plot_multi(results, max_k, dataset, out, n_classes=10):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ks = list(range(max_k + 1))
+    mults = [k for k in ks if k > 0 and k % n_classes == 0]
+    ms = 4 if max_k > 25 else 6
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    fig, (ax, axd) = plt.subplots(
+        2, 1, sharex=True, gridspec_kw={"height_ratios": [2, 1]}, figsize=(9, 7))
+
+    for i, (label, accs, eff) in enumerate(results):
+        c = colors[i % len(colors)]
+        ax.plot(ks, [a * 100 for a in accs], "o-", lw=1.5, ms=ms, color=c, label=label)
+        if mults:
+            ax.plot(mults, [accs[k] * 100 for k in mults], "o", ms=ms + 3,
+                    mfc="none", mec=c, mew=1.5)
+        axd.plot(ks, eff, "s-", lw=1.5, ms=ms, color=c, label=label)
+
+    ax.axhline(100 / n_classes, ls=":", c="lightgray", lw=1, label=f"chance ({100/n_classes:.0f}%)")
+    ax.set_ylabel("transition accuracy\nP(pred = (i+k) mod n)  [%]")
+    ax.set_title(f"op^k transition accuracy — {dataset}")
+    ax.set_ylim(0, 105)
+    ax.legend(loc="upper right", fontsize=7, ncol=2)
+    ax.grid(alpha=0.3)
+
+    axd.axhline(n_classes, ls=":", c="lightgray", lw=1, label=f"uniform ({n_classes})")
+    axd.axhline(1, ls=":", c="lightgray", lw=1, label="collapsed (1)")
+    axd.set_ylabel("output diversity\n(eff. # classes)")
+    axd.set_xlabel("k  (operator compositions)")
+    axd.set_ylim(0, n_classes + 0.5)
+    axd.legend(loc="lower left", fontsize=7, ncol=2)
+    axd.grid(alpha=0.3)
     step = 1 if max_k <= 20 else (n_classes if max_k <= 120 else 2 * n_classes)
     axd.set_xticks(list(range(0, max_k + 1, step)))
 
@@ -357,7 +419,7 @@ def _plot_nn(base, results, b_med, dataset, ckpt_name, out):
 def main():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
                                 description="Score op^k transition accuracy with the pixel classifier.")
-    p.add_argument("checkpoint",     help="path to .pt checkpoint from train_ring.py")
+    p.add_argument("checkpoint", nargs="+", help="one or more .pt checkpoints from train_ring.py")
     p.add_argument("--max-k",        type=int, default=None, help="highest k to evaluate (default: n_classes, closes the ring)")
     p.add_argument("--n-classes",    type=int, default=10,   help="number of classes (ring size)")
     p.add_argument("--n-samples",    type=int, default=5000, help="test images to score (0 = full test set)")
@@ -377,8 +439,14 @@ def main():
     p.add_argument("--nn-out",       type=str, default=None, help="off-support plot path (default: nn_probe.png)")
     args = p.parse_args()
     if args.confusion_k:
+        if len(args.checkpoint) > 1:
+            print("--confusion-k requires a single checkpoint"); sys.exit(1)
+        args.checkpoint = args.checkpoint[0]
         confusion_analysis(args)
     elif args.nn_probe:
+        if len(args.checkpoint) > 1:
+            print("--nn-probe requires a single checkpoint"); sys.exit(1)
+        args.checkpoint = args.checkpoint[0]
         nn_probe(args)
     else:
         score(args)
