@@ -124,14 +124,13 @@ def score(args):
         label = os.path.splitext(os.path.basename(ckpt))[0]
         results.append((label, accs, eff))
 
-    if not args.no_plot:
-        if len(results) == 1:
-            label, accs, eff = results[0]
-            out = args.out or f"op_k_{label}.png"
-            _plot(accs, eff, max_k, dataset, out, n_classes, label + ".pt")
-        else:
-            out = args.out or "op_k_comparison.png"
-            _plot_multi(results, max_k, dataset, out, n_classes)
+        if not args.no_plot:
+            if len(results) == 1 and len(checkpoints) == 1:
+                out = args.out or f"op_k_{label}.png"
+                _plot(accs, eff, max_k, dataset, out, n_classes, label + ".pt")
+            else:
+                out = args.out or "op_k_comparison.png"
+                _plot_multi(results, max_k, dataset, out, n_classes)
     return results
 
 
