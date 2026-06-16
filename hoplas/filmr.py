@@ -172,13 +172,18 @@ class FiLMR_expm(nn.Module):
 
 class MatOp(nn.Module):
     "just a square matrix operation"
-    def __init__(self, nd=2):
+    def __init__(self, nd=2, spectral_clip=False):
         super().__init__()
         self.mat = nn.Parameter(0.1 * torch.randn((nd,nd)))
-        
+        self.spectral_clip = spectral_clip
+
     def forward(self, x):
-        x = self.mat.to(x.device).T @ x.T
-        x = x.T @ self.mat.to(x.device)
+        W = self.mat.to(x.device)
+        if self.spectral_clip:
+            sigma = torch.linalg.matrix_norm(W, ord=2)
+            W = W / sigma.clamp(min=1.0)
+        x = W.T @ x.T
+        x = x.T @ W
         return x
 
 

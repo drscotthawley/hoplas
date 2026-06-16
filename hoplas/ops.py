@@ -22,6 +22,8 @@ class OpWrapper(nn.Module):
             self.op = FiLMR_expm(nd=nd, rank=rank)
         elif method == "matop":
             self.op = MatOp(nd=nd)
+        elif method == "matop_clip":
+            self.op = MatOp(nd=nd, spectral_clip=True)
         elif method == "matop2":
             self.op = MatOp2(nd=nd)
         elif method == "ph":

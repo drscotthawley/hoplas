@@ -224,11 +224,11 @@ def _plot_multi(results, max_k, dataset, out, n_classes=10):
         ls = "-" if is_norm else "--"
         marker = "o" if is_norm else "s"
         ax.plot(ks, [a * 100 for a in accs], marker + ls, lw=1.5, ms=ms,
-                color=c, label=disp)
+                color=c, alpha=0.7, label=disp)
         if mults:
             ax.plot(mults, [accs[k] * 100 for k in mults], marker, ms=ms + 3,
-                    mfc="none", mec=c, mew=1.5)
-        axd.plot(ks, eff, marker + ls, lw=1.5, ms=ms, color=c, label=disp)
+                    mfc="none", mec=c, mew=1.5, alpha=0.7)
+        axd.plot(ks, eff, marker + ls, lw=1.5, ms=ms, color=c, alpha=0.7, label=disp)
 
     ax.axhline(100 / n_classes, ls=":", c="lightgray", lw=1, label=f"chance ({100/n_classes:.0f}%)")
     ax.set_ylabel("transition accuracy\nP(pred = (i+k) mod n)  [%]")
