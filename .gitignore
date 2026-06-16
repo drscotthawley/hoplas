@@ -222,3 +222,8 @@ third_party/
 *.safetensors
 /data/
 mnist_latents.pt
+
+# paper drafts (local only)
+*.tex
+*.pdf
+paper/
