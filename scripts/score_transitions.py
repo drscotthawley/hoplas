@@ -144,6 +144,10 @@ def score(args):
             print(f"  saved cache -> {csv_path}")
         results.append((label, accs, eff))
 
+        # dataset may be None if everything loaded from cache (VAE step skipped); infer from label prefix
+        if dataset is None:
+            dataset = label.split("_")[0]
+
         if not args.no_plot:
             legend_loc = {"tr": "upper right", "bl": "lower left"}[args.legend]
             if len(results) == 1 and len(checkpoints) == 1:
@@ -226,7 +230,7 @@ def _plot_multi(results, max_k, dataset, out, n_classes=10, progress="", legend_
     import matplotlib.pyplot as plt
 
     OP_COLORS = {
-        "ph_2": "#08519c", "ph_4": "#00897b", "ph_8": "#80cbc4", "ph_16": "#b2dfdb",
+        "ph_2": "#08519c", "ph_4": "#4292c6", "ph_8": "#00897b", "ph_16": "#41ab5d",
         "quat_4": "#1a7a1a", "quat": "#1a7a1a",
         "kquat_4": "#74c476", "kquat": "#74c476",
         "kdualquat": "#c7e9c0",
