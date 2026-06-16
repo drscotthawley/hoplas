@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from hoplas.filmr import FiLMR, FiLMR_expm, MatOp, MatOp2
 from hoplas.ph_layers import PHMLinear
-from hoplas.kingdon_layers import KingdonQuaternion
+from hoplas.kingdon_layers import KingdonQuaternion, KingdonDualQuaternion
 
 
 class OpWrapper(nn.Module):
@@ -37,8 +37,12 @@ class OpWrapper(nn.Module):
             self.op = PHMLinear(n=4, in_features=nd, out_features=nd)
         elif method == "kquat":
             if nd % 4 != 0:
-                raise ValueError(f"nd={nd} must be divisible by 4 for QuaternionKingdon")
+                raise ValueError(f"nd={nd} must be divisible by 4 for KingdonQuaternion")
             self.op = KingdonQuaternion(in_features=nd, out_features=nd)
+        elif method == "kdualquat":
+            if nd % 8 != 0:
+                raise ValueError(f"nd={nd} must be divisible by 8 for KingdonDualQuaternion")
+            self.op = KingdonDualQuaternion(in_features=nd, out_features=nd)
         else:
             raise ValueError(f"Unknown method: {method}")
 
