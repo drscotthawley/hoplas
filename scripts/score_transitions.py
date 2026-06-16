@@ -118,27 +118,40 @@ def score(args):
     n_classes = args.n_classes
     max_k = args.max_k if args.max_k is not None else n_classes
 
-    mu_cache, vae, classifier, dataset, device = _build_mu_cache(checkpoints[0], args)
+    mu_cache = vae = classifier = dataset = device = None
 
     results = []
     n_ckpts = len(checkpoints)
     for idx, ckpt in enumerate(checkpoints, 1):
         progress = f"[{idx}/{n_ckpts}]"
-        accs, eff = score_one(ckpt, args, mu_cache, vae, classifier, dataset, device, progress=progress)
         label = os.path.splitext(os.path.basename(ckpt))[0]
+        csv_path = f"op_k_{label}.csv"
+        if not args.no_cache and os.path.exists(csv_path):
+            print(f"\n{progress} {os.path.basename(ckpt)}  (loading cached {csv_path})")
+            data = np.loadtxt(csv_path, delimiter=",", skiprows=1)
+            accs = list(data[:, 1])
+            eff  = list(data[:, 2])
+        else:
+            if mu_cache is None:
+                mu_cache, vae, classifier, dataset, device = _build_mu_cache(checkpoints[0], args)
+            accs, eff = score_one(ckpt, args, mu_cache, vae, classifier, dataset, device, progress=progress)
+            np.savetxt(csv_path, np.column_stack([range(len(accs)), accs, eff]),
+                       delimiter=",", header="k,acc,eff", comments="")
+            print(f"  saved cache -> {csv_path}")
         results.append((label, accs, eff))
 
         if not args.no_plot:
+            legend_loc = {"tr": "upper right", "bl": "lower left"}[args.legend]
             if len(results) == 1 and len(checkpoints) == 1:
                 out = args.out or f"op_k_{label}.png"
-                _plot(accs, eff, max_k, dataset, out, n_classes, label + ".pt", progress=progress)
+                _plot(accs, eff, max_k, dataset, out, n_classes, label + ".pt", progress=progress, legend_loc=legend_loc)
             else:
                 out = args.out or "op_k_comparison.png"
-                _plot_multi(results, max_k, dataset, out, n_classes, progress=progress)
+                _plot_multi(results, max_k, dataset, out, n_classes, progress=progress, legend_loc=legend_loc)
     return results
 
 
-def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None, progress=""):
+def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None, progress="", legend_loc="upper right"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -165,7 +178,7 @@ def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None, progress
         title += f"\n{ckpt_name}"
     ax.set_title(title)
     ax.set_ylim(0, 105)
-    ax.legend(loc="lower left", fontsize=8)
+    ax.legend(loc=legend_loc, fontsize=8)
     ax.grid(alpha=0.3)
 
     # ── output-diversity panel (collapse detector) ──
@@ -203,7 +216,7 @@ def _parse_label(label):
     return "other", is_norm, s
 
 
-def _plot_multi(results, max_k, dataset, out, n_classes=10, progress=""):
+def _plot_multi(results, max_k, dataset, out, n_classes=10, progress="", legend_loc="upper right"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -242,7 +255,7 @@ def _plot_multi(results, max_k, dataset, out, n_classes=10, progress=""):
     ax.set_title(f"op^k transition accuracy — {dataset}\n"
                  "color=op type  ●solid=norm  ■dashed=nonorm")
     ax.set_ylim(0, 105)
-    ax.legend(loc="upper right", fontsize=7, ncol=2)
+    ax.legend(loc=legend_loc, fontsize=7, ncol=2)
     ax.grid(alpha=0.3)
 
     axd.axhline(n_classes, ls=":", c="lightgray", lw=1, label=f"uniform ({n_classes})")
@@ -472,6 +485,8 @@ def main():
     p.add_argument("--n-samples",    type=int, default=5000, help="test images to score (0 = full test set)")
     p.add_argument("--batch-size",   type=int, default=512,  help="eval batch size")
     p.add_argument("--out",          type=str, default=None, help="output plot path (default: op_k_<checkpoint>.png)")
+    p.add_argument("--legend",       choices=["tr", "bl"],   default="tr", help="top-plot legend position: tr=upper right, bl=lower left")
+    p.add_argument("--no-cache",     action="store_true",    help="ignore cached CSVs and rerun inference")
     p.add_argument("--no-plot",      action="store_true",    help="skip plotting, print tables only")
     p.add_argument("--device",       type=str, default=None, help="cuda/mps/cpu (default: auto)")
     p.add_argument("--confusion-k",  type=int, nargs="+", default=None, metavar="K",
