@@ -34,7 +34,9 @@ class OpWrapper(nn.Module):
         elif method == "quat":
             if nd % 4 != 0:
                 raise ValueError(f"nd={nd} must be divisible by 4 for frozen quaternion")
-            self.op = PHMLinear(n=4, in_features=nd, out_features=nd)
+            # rand_init_a=False so RNG consumption matches KingdonQuaternion (kquat),
+            # letting the two share identical s/bias/inv_proj init under the same seed.
+            self.op = PHMLinear(n=4, in_features=nd, out_features=nd, rand_init_a=False)
         elif method == "kquat":
             if nd % 4 != 0:
                 raise ValueError(f"nd={nd} must be divisible by 4 for KingdonQuaternion")

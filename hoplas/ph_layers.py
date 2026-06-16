@@ -47,7 +47,7 @@ from torch.nn.parameter import Parameter
 
 class PHMLinear(nn.Module):
 
-  def __init__(self, n, in_features, out_features, cuda=True):
+  def __init__(self, n, in_features, out_features, cuda=True, rand_init_a=True):
     super(PHMLinear, self).__init__()
     self.n = n
     self.in_features = in_features
@@ -56,7 +56,12 @@ class PHMLinear(nn.Module):
 
     self.bias = nn.Parameter(torch.Tensor(out_features))
 
-    self.a = nn.Parameter(torch.nn.init.xavier_uniform_(torch.zeros((n, n, n))))
+    # rand_init_a=False: zero-init (no RNG draw) for the frozen-algebra case (e.g. quat),
+    # so the RNG stream reaching s/bias matches a layer that never draws a (KingdonQuaternion).
+    if rand_init_a:
+        self.a = nn.Parameter(torch.nn.init.xavier_uniform_(torch.zeros((n, n, n))))
+    else:
+        self.a = nn.Parameter(torch.zeros((n, n, n)))
 
     self.s = nn.Parameter(torch.nn.init.xavier_uniform_(torch.zeros((n, self.out_features//n, self.in_features//n))))
 
