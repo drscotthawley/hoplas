@@ -187,7 +187,7 @@ def _parse_label(label):
     op_key includes order for ph/quat so each gets a distinct color."""
     s = label.removeprefix("mnist_")
     is_norm = not s.endswith("_nonorm")
-    for op in ("filmr_expm", "filmr", "matop2", "matop", "quat", "ph"):
+    for op in ("filmr_expm", "filmr", "matop2", "matop", "kquat", "quat", "ph"):
         if s.startswith(op):
             # extract order digit if present (e.g. ph_4, quat_4)
             rest = s[len(op):]
@@ -205,7 +205,8 @@ def _plot_multi(results, max_k, dataset, out, n_classes=10):
 
     OP_COLORS = {
         "ph_2": "#08519c", "ph_4": "#3182bd", "ph_8": "#9ecae1",
-        "quat_4": "#2ca02c", "quat": "#2ca02c",
+        "quat_4": "#1a7a1a", "quat": "#1a7a1a",
+        "kquat_4": "#74c476", "kquat": "#74c476",
         "filmr_expm": "#99000d", "filmr_expm_4": "#ef3b2c", "filmr_expm_8": "#fc8d59",
         "filmr": "#e08020",
         "matop": "#9467bd", "matop2": "#8c564b", "other": "gray",
