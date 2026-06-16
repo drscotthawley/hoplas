@@ -255,7 +255,8 @@ def _plot_multi(results, max_k, dataset, out, n_classes=10, progress=""):
 
     fig.tight_layout()
     fig.savefig(out, dpi=150)
-    print(f"\nsaved plot -> {out}")
+    prefix = f"{progress} " if progress else ""
+    print(f"\n{prefix}saved plot -> {out}")
 
 
 # ───────────────────────── confusion / displacement analysis ─────────────────────────
