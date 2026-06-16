@@ -193,7 +193,7 @@ def _parse_label(label):
             # extract order digit if present (e.g. ph_4, quat_4)
             rest = s[len(op):]
             import re
-            m = re.match(r"_(\d+)", rest)
+            m = re.match(r"_(?:rank)?(\d+)", rest)
             key = f"{op}_{m.group(1)}" if m else op
             return key, is_norm, s
     return "other", is_norm, s
@@ -207,7 +207,8 @@ def _plot_multi(results, max_k, dataset, out, n_classes=10):
     OP_COLORS = {
         "ph_2": "#08519c", "ph_4": "#3182bd", "ph_8": "#9ecae1",
         "quat_4": "#2ca02c", "quat": "#2ca02c",
-        "filmr_expm": "#d62728", "filmr": "#e08020",
+        "filmr_expm": "#99000d", "filmr_expm_4": "#ef3b2c", "filmr_expm_8": "#fc8d59",
+        "filmr": "#e08020",
         "matop": "#9467bd", "matop2": "#8c564b", "other": "gray",
     }
 
