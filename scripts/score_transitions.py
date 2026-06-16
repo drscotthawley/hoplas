@@ -65,22 +65,34 @@ def _effective_n(counts):
 
 
 @torch.no_grad()
-def score_one(checkpoint, args):
-    """Score a single checkpoint; return (accs, eff, dataset) without plotting."""
+def _build_mu_cache(checkpoint, args):
+    """Encode the test set once with the VAE; return (cache, vae, classifier, dataset, device).
+    cache = list of (mu_batch, labels_batch) on device."""
     proj, trans_op, inv_proj, device, dataset = load_for_inference(checkpoint, args.device)
     vae = load_vae(dataset, device=str(device))
     clf_key = "cifar10" if dataset.startswith("cifar") else "mnist"
     classifier = load_classifier(clf_key, device=str(device))
+    loader = _test_loader(dataset, args.n_samples, args.batch_size)
+    cache = []
+    for imgs, labels in loader:
+        mu, _ = vae.encoder(imgs.to(device))
+        cache.append((mu, labels))
+    print(f"  VAE-encoded {sum(l.size(0) for _, l in cache)} samples (cached for all checkpoints)")
+    return cache, vae, classifier, dataset, device
+
+
+@torch.no_grad()
+def score_one(checkpoint, args, mu_cache, vae, classifier, dataset, device):
+    """Score a single checkpoint using pre-encoded mu_cache; return (accs, eff)."""
+    proj, trans_op, inv_proj, dev2, _ = load_for_inference(checkpoint, args.device)
 
     n_classes = args.n_classes
     max_k = args.max_k if args.max_k is not None else n_classes
-    loader = _test_loader(dataset, args.n_samples, args.batch_size)
 
     correct = {k: 0 for k in range(max_k + 1)}
     pred_hist = {k: np.zeros(n_classes) for k in range(max_k + 1)}
     total = 0
-    for imgs, labels in loader:
-        mu, _ = vae.encoder(imgs.to(device))
+    for mu, labels in mu_cache:
         for k in range(max_k + 1):
             acc_k, preds, targets = transition_accuracy(
                 vae, proj, trans_op, inv_proj, classifier, mu, labels, k, n_classes)
@@ -95,7 +107,7 @@ def score_one(checkpoint, args):
     for k in range(max_k + 1):
         tag = " (recon)" if k == 0 else ""
         print(f"  {k:>3}  {'(i+%d)%%%d' % (k, n_classes):>8}  {accs[k]*100:6.2f}%  {eff[k]:7.2f}{tag}")
-    return accs, eff, dataset
+    return accs, eff
 
 
 def score(args):
@@ -104,13 +116,13 @@ def score(args):
     n_classes = args.n_classes
     max_k = args.max_k if args.max_k is not None else n_classes
 
+    mu_cache, vae, classifier, dataset, device = _build_mu_cache(checkpoints[0], args)
+
     results = []
-    dataset = None
     for ckpt in checkpoints:
-        accs, eff, ds = score_one(ckpt, args)
+        accs, eff = score_one(ckpt, args, mu_cache, vae, classifier, dataset, device)
         label = os.path.splitext(os.path.basename(ckpt))[0]
         results.append((label, accs, eff))
-        dataset = ds
 
     if not args.no_plot:
         if len(results) == 1:
@@ -171,30 +183,48 @@ def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None):
     print(f"\nsaved plot -> {out}")
 
 
+def _parse_label(label):
+    """Extract (op_type, is_norm, display_label) from a checkpoint stem."""
+    s = label.removeprefix("mnist_")
+    is_norm = not s.endswith("_nonorm")
+    for op in ("filmr_expm", "filmr", "matop2", "matop", "quat", "ph"):
+        if s.startswith(op):
+            return op, is_norm, s
+    return "other", is_norm, s
+
+
 def _plot_multi(results, max_k, dataset, out, n_classes=10):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    OP_COLORS = {"ph": "#1f77b4", "quat": "#2ca02c",
+                 "filmr_expm": "#d62728", "filmr": "#e08020",
+                 "matop": "#9467bd", "matop2": "#8c564b", "other": "gray"}
+
     ks = list(range(max_k + 1))
     mults = [k for k in ks if k > 0 and k % n_classes == 0]
     ms = 4 if max_k > 25 else 6
-    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
     fig, (ax, axd) = plt.subplots(
-        2, 1, sharex=True, gridspec_kw={"height_ratios": [2, 1]}, figsize=(9, 7))
+        2, 1, sharex=True, gridspec_kw={"height_ratios": [2, 1]}, figsize=(10, 7))
 
-    for i, (label, accs, eff) in enumerate(results):
-        c = colors[i % len(colors)]
-        ax.plot(ks, [a * 100 for a in accs], "o-", lw=1.5, ms=ms, color=c, label=label)
+    for label, accs, eff in results:
+        op, is_norm, disp = _parse_label(label)
+        c = OP_COLORS.get(op, "gray")
+        ls = "-" if is_norm else "--"
+        marker = "o" if is_norm else "s"
+        ax.plot(ks, [a * 100 for a in accs], marker + ls, lw=1.5, ms=ms,
+                color=c, label=disp)
         if mults:
-            ax.plot(mults, [accs[k] * 100 for k in mults], "o", ms=ms + 3,
+            ax.plot(mults, [accs[k] * 100 for k in mults], marker, ms=ms + 3,
                     mfc="none", mec=c, mew=1.5)
-        axd.plot(ks, eff, "s-", lw=1.5, ms=ms, color=c, label=label)
+        axd.plot(ks, eff, marker + ls, lw=1.5, ms=ms, color=c, label=disp)
 
     ax.axhline(100 / n_classes, ls=":", c="lightgray", lw=1, label=f"chance ({100/n_classes:.0f}%)")
     ax.set_ylabel("transition accuracy\nP(pred = (i+k) mod n)  [%]")
-    ax.set_title(f"op^k transition accuracy — {dataset}")
+    ax.set_title(f"op^k transition accuracy — {dataset}\n"
+                 "color=op type  ●solid=norm  ■dashed=nonorm")
     ax.set_ylim(0, 105)
     ax.legend(loc="upper right", fontsize=7, ncol=2)
     ax.grid(alpha=0.3)
