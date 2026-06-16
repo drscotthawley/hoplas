@@ -1,19 +1,21 @@
 #!/bin/bash
-# Launch all configs/mnist_*.cfg on a remote host, keeping MAX_PAR slots busy.
+# Launch configs on a remote host, keeping MAX_PAR slots busy.
 # Polls by PID; when a slot frees, launches the next config in the queue.
 #
 # Usage:
-#   ./scripts/launch_queue.sh <host> [max_parallel] [gpu_id]
+#   ./scripts/launch_queue.sh <host> [max_parallel] [gpu_id] [config_files...]
 #
-# Example:
-#   ./scripts/launch_queue.sh lecun 2 0
+# Examples:
+#   ./scripts/launch_queue.sh lecun              # all configs/mnist_*.cfg, 2 parallel, GPU 0
+#   ./scripts/launch_queue.sh lecun 2 0 configs/mnist_filmr_expm_rank*.cfg
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
-HOST="${1:?Usage: $0 <host> [max_parallel] [gpu_id]}"
+HOST="${1:?Usage: $0 <host> [max_parallel] [gpu_id] [config_files...]}"
 MAX_PAR="${2:-2}"
 GPU="${3:-0}"
+shift 3 2>/dev/null || shift $#   # remaining args are optional config files
 POLL_INTERVAL=60   # seconds between status checks
 LAUNCH_GRACE=10    # seconds to wait after launch before polling
 
@@ -21,8 +23,12 @@ SSH="ssh -o ClearAllForwardings=yes"
 REMOTE_REPO="${HOPLAS_REMOTE_REPO:-~/github/hoplas}"
 REMOTE_ENV="${HOPLAS_REMOTE_ENV:-~/envs/hoplas}"
 
-# Build queue from configs dir
-QUEUE=($(ls "${REPO_DIR}"/configs/mnist_*.cfg 2>/dev/null | xargs -n1 basename | sed 's/\.cfg$//'))
+# Build queue: from explicit args or default glob
+if [[ $# -gt 0 ]]; then
+    QUEUE=($(for f in "$@"; do basename "${f}" .cfg; done))
+else
+    QUEUE=($(ls "${REPO_DIR}"/configs/mnist_*.cfg 2>/dev/null | xargs -n1 basename | sed 's/\.cfg$//'))
+fi
 [[ ${#QUEUE[@]} -eq 0 ]] && { echo "No configs/mnist_*.cfg found."; exit 1; }
 
 echo "Queue (${#QUEUE[@]} configs): ${QUEUE[*]}"

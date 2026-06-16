@@ -217,6 +217,13 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# hoplas: local runtime dirs
+.DS_Store
+.claude/
+checkpoints/
+wandb/
+scripts/data/
+
 # hoplas: downloaded third-party code, model weights, and datasets
 third_party/
 *.safetensors
