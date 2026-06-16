@@ -184,12 +184,18 @@ def _plot(accs, eff, max_k, dataset, out, n_classes=10, ckpt_name=None):
 
 
 def _parse_label(label):
-    """Extract (op_type, is_norm, display_label) from a checkpoint stem."""
+    """Extract (op_key, is_norm, display_label) from a checkpoint stem.
+    op_key includes order for ph/quat so each gets a distinct color."""
     s = label.removeprefix("mnist_")
     is_norm = not s.endswith("_nonorm")
     for op in ("filmr_expm", "filmr", "matop2", "matop", "quat", "ph"):
         if s.startswith(op):
-            return op, is_norm, s
+            # extract order digit if present (e.g. ph_4, quat_4)
+            rest = s[len(op):]
+            import re
+            m = re.match(r"_(\d+)", rest)
+            key = f"{op}_{m.group(1)}" if m else op
+            return key, is_norm, s
     return "other", is_norm, s
 
 
@@ -198,9 +204,12 @@ def _plot_multi(results, max_k, dataset, out, n_classes=10):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    OP_COLORS = {"ph": "#1f77b4", "quat": "#2ca02c",
-                 "filmr_expm": "#d62728", "filmr": "#e08020",
-                 "matop": "#9467bd", "matop2": "#8c564b", "other": "gray"}
+    OP_COLORS = {
+        "ph_2": "#08519c", "ph_4": "#3182bd", "ph_8": "#9ecae1",
+        "quat_4": "#2ca02c", "quat": "#2ca02c",
+        "filmr_expm": "#d62728", "filmr": "#e08020",
+        "matop": "#9467bd", "matop2": "#8c564b", "other": "gray",
+    }
 
     ks = list(range(max_k + 1))
     mults = [k for k in ks if k > 0 and k % n_classes == 0]
