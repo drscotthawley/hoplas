@@ -82,8 +82,10 @@ def _build_mu_cache(checkpoint, args):
 
 
 @torch.no_grad()
-def score_one(checkpoint, args, mu_cache, vae, classifier, dataset, device):
+def score_one(checkpoint, args, mu_cache, vae, classifier, dataset, device, progress=""):
     """Score a single checkpoint using pre-encoded mu_cache; return (accs, eff)."""
+    if progress:
+        print(f"\n{progress}")
     proj, trans_op, inv_proj, dev2, _ = load_for_inference(checkpoint, args.device)
 
     n_classes = args.n_classes
@@ -121,12 +123,12 @@ def score(args):
     results = []
     n_ckpts = len(checkpoints)
     for idx, ckpt in enumerate(checkpoints, 1):
-        accs, eff = score_one(ckpt, args, mu_cache, vae, classifier, dataset, device)
+        progress = f"[{idx}/{n_ckpts}]"
+        accs, eff = score_one(ckpt, args, mu_cache, vae, classifier, dataset, device, progress=progress)
         label = os.path.splitext(os.path.basename(ckpt))[0]
         results.append((label, accs, eff))
 
         if not args.no_plot:
-            progress = f"[{idx}/{n_ckpts}]"
             if len(results) == 1 and len(checkpoints) == 1:
                 out = args.out or f"op_k_{label}.png"
                 _plot(accs, eff, max_k, dataset, out, n_classes, label + ".pt", progress=progress)
