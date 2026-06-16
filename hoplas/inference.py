@@ -130,7 +130,7 @@ def run_demo(ckpt_path, out_dir=".", n_per_class=10, device=None):
 
 def main():
     p = argparse.ArgumentParser(description="hoplas inference demo")
-    p.add_argument("checkpoint", help="path to .pt checkpoint from train_ring.py")
+    p.add_argument("checkpoint", help="path to .pt checkpoint from train_ops.py")
     p.add_argument("--out-dir", default=".", help="directory for output PNGs")
     p.add_argument("--n-per-class", type=int, default=10, help="rows per digit (default 10 -> 10x10 grid)")
     p.add_argument("--cpu", action="store_true")

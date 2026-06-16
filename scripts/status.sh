@@ -30,7 +30,7 @@ sleep 2
 SIZE2=\$(wc -c < "\$LOG")
 [ "\$SIZE2" -gt "\$SIZE1" ] && LOG_GROWING=1
 
-MAIN_PID=\$(ps aux | grep '[p]ython.*train_ring' | awk '{print \$2}' | sort -n | head -1)
+MAIN_PID=\$(ps aux | grep '[p]ython.*train_ops' | awk '{print \$2}' | sort -n | head -1)
 if [ "\$LOG_GROWING" -eq 1 ]; then
     echo "Status: RUNNING (log growing\$([ -n "\$MAIN_PID" ] && echo ", PID \$MAIN_PID"))"
     [ -n "\$MAIN_PID" ] && echo "  \$(ps -p \$MAIN_PID -o cmd=)"

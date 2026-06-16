@@ -230,7 +230,7 @@ def _plot_multi(results, max_k, dataset, out, n_classes=10, progress="", legend_
     import matplotlib.pyplot as plt
 
     OP_COLORS = {
-        "ph_2": "#08519c", "ph_4": "#4292c6", "ph_8": "#00897b", "ph_16": "#41ab5d",
+        "ph_2": "#08306b", "ph_4": "#2171b5", "ph_8": "#1b9e8c", "ph_16": "#00d0d8",
         "quat_4": "#1a7a1a", "quat": "#1a7a1a",
         "kquat_4": "#74c476", "kquat": "#74c476",
         "kdualquat": "#c7e9c0",
@@ -487,7 +487,7 @@ def _plot_nn(base, results, b_med, dataset, ckpt_name, out):
 def main():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
                                 description="Score op^k transition accuracy with the pixel classifier.")
-    p.add_argument("checkpoint", nargs="+", help="one or more .pt checkpoints from train_ring.py")
+    p.add_argument("checkpoint", nargs="+", help="one or more .pt checkpoints from train_ops.py")
     p.add_argument("--max-k",        type=int, default=None, help="highest k to evaluate (default: n_classes, closes the ring)")
     p.add_argument("--n-classes",    type=int, default=10,   help="number of classes (ring size)")
     p.add_argument("--n-samples",    type=int, default=5000, help="test images to score (0 = full test set)")

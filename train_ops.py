@@ -89,8 +89,8 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu") if not args.cpu else torch.device("cpu")
     _PT_PATHS = {"mnist": "~/datasets/mnist_latents.pt", "cifar": "~/datasets/cifar_latents.pt"}
     if args.dataset == "line":
-        dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise)
-        val_dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, debug=False, len=5000)
+        dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, target=args.target)
+        val_dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, debug=False, len=5000, target=args.target)
     else:
         pt = _PT_PATHS[args.dataset]
         dataset = EncodingsDataset(pt_path=pt, split="train")
@@ -105,9 +105,11 @@ def train(args):
     run_name = f"{args.op}_{args.order}" if args.op in ("ph", "quat") else args.op
     if args.op in ("filmr_expm", "filmr") and args.rank != 2:
         run_name = f"{args.op}_{args.rank}"
-    run_name = f"{args.dataset}_{run_name}"
+    # for line dataset, encode the target (ring/reflect) into the name so runs don't collide
+    prefix = f"line_{args.target}" if args.dataset == "line" else args.dataset
+    run_name = f"{prefix}_{run_name}"
     run_name = f"{run_name}_{args.tag}" if args.tag else run_name
-    project = {"line": "ring", "mnist": "ring-mnist", "cifar": "ring-cifar"}[args.dataset]
+    project = {"line": f"line-{args.target}", "mnist": "ring-mnist", "cifar": "ring-cifar"}[args.dataset]
     if not args.no_wandb:
         wandb.init(project=project, name=run_name, config=vars(args))
         # index every logged metric/media by epoch, so panel sliders (incl. images) read in epochs, not steps
@@ -265,6 +267,8 @@ def main():
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--noise", type=float, default=0.01, help="Jitter added to each point")
     p.add_argument("--npoints", type=int, default=12, help="Number of quantized points on the line")
+    p.add_argument("--target", choices=["ring", "reflect"], default="ring",
+                   help="LineDataset target: ring (cyclic T) or reflect (dihedral inversion I)")
     p.add_argument("--op", choices=["filmr", "filmr_expm", "matop", "matop_clip", "matop2", "ph", "quat", "kquat", "kdualquat"], default="filmr_expm")
     p.add_argument("--op-lr", type=float, default=None,
                    help="Separate LR for trans_op (default: same as --lr). Lower it to slow the angle's climb.")

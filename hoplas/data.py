@@ -13,26 +13,34 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class LineDataset(Dataset):
-    """ Dataset of along line in N-dim space (+ optional noise), 
-        with the target being the next point on the line (+ optional noise), 
-        with a 'wrap around' boundary condition on the end. 
+    """ Dataset of along line in N-dim space (+ optional noise),
+        with the target being a transform of the input point (+ optional noise),
+        with a 'wrap around' boundary condition on the end.
+
+        target:
+          'ring' (default) — next point on the line: j = (i + 1) % npoints (cyclic transposition T)
+          'reflect'        — pitch-class inversion: j = (-i) % npoints (dihedral reflection I, fixes 0)
     """
-    def __init__(self, nd=3, npoints=12, noise=0.00, debug=True, len=60_000):
+    def __init__(self, nd=3, npoints=12, noise=0.00, debug=True, len=60_000, target='ring'):
         super().__init__()
-        self.nd, self.npoints, self.noise, self.len = nd, npoints, noise, len
-        self.line_vals = torch.linspace(-1.0, 1.0, npoints) # points in a line 
+        assert target in ('ring', 'reflect'), f"target must be 'ring' or 'reflect', got {target}"
+        self.nd, self.npoints, self.noise, self.len, self.target = nd, npoints, noise, len, target
+        self.line_vals = torch.linspace(-1.0, 1.0, npoints) # points in a line
         if debug:
-            print(f"LineDataset: nd={nd}  npoints={npoints}  noise={noise}")
+            print(f"LineDataset: nd={nd}  npoints={npoints}  noise={noise}  target={target}")
             print(f"line_vals: {self.line_vals}")
 
     def __len__(self): # a big to constitute and "epoch"
         return self.len
-    
+
     def __getitem__(self, idx):
         inp = self.noise * torch.randn(self.nd)
         tgt = self.noise * torch.randn(self.nd)
         i = torch.randint(self.npoints, (1,)).item()
-        j = (i + 1) % self.npoints     # next, roll/wrap at the end
+        if self.target == 'reflect':
+            j = (-i) % self.npoints    # pitch-class inversion x -> -x mod n (fixes 0)
+        else:
+            j = (i + 1) % self.npoints # 'ring': next, roll/wrap at the end
         inp[0] += self.line_vals[i]
         tgt[0] += self.line_vals[j]
         return {'data': inp, 'label': i}, {'data': tgt, 'label': j}

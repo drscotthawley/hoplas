@@ -71,7 +71,7 @@ echo "Syncing source to ${HOST}:${REMOTE_REPO}..."
 rsync -az --exclude='*.pyc' --exclude='__pycache__' --exclude='.git' \
     --exclude='wandb' --exclude='checkpoints' --exclude='*.pt' \
     "${REPO_DIR}/hoplas/" "${HOST}:${REMOTE_REPO}/hoplas/"
-rsync -az "${REPO_DIR}/train_ring.py" "${HOST}:${REMOTE_REPO}/"
+rsync -az "${REPO_DIR}/train_ops.py" "${HOST}:${REMOTE_REPO}/"
 rsync -az "${REPO_DIR}/configs/" "${HOST}:${REMOTE_REPO}/configs/"
 $SSH "${HOST}" "mkdir -p ${REMOTE_REPO}/logs ${REMOTE_REPO}/checkpoints"
 echo ""
@@ -91,7 +91,7 @@ launch_next() {
 #!/bin/bash
 source ${REMOTE_ENV}/bin/activate
 cd ${REMOTE_REPO}
-CUDA_VISIBLE_DEVICES=${GPU} nohup python train_ring.py --config ${remote_config} \
+CUDA_VISIBLE_DEVICES=${GPU} nohup python train_ops.py --config ${remote_config} \
     > ${log} 2>&1 &
 echo \$!
 EOF

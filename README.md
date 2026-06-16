@@ -131,11 +131,12 @@ while order 16 saturates the Kronecker-sum parameterization and can represent
 any matrix, so it solves the rotation exactly. The constrained ph orders (2/4/8)
 improve as more input channels are correlated (loss drops left-to-right).
 
-### 2. Ring task — `train_ring.py`
+### 2. Operator-learning task — `train_ops.py`
 
 The main experiment. A `Projector` maps data into a new space, a `trans_op`
-(one of the operators above) advances each point to the next in a cycle, and an
-inverse projector maps back. Training is **self-supervised**: a similarity loss
+(one of the operators above) transforms each point — advancing it to the next in
+a cycle (`--target ring`) or reflecting it (`--target reflect`, dihedral
+inversion) — and an inverse projector maps back. Training is **self-supervised**: a similarity loss
 pulls `trans_op(proj(xᵢ))` toward `proj(xᵢ₊₁)`, **SIGReg** (an Epps–Pulley
 normality-test regularizer, [`hoplas/losses.py`](hoplas/losses.py)) spreads the
 distribution, and a reconstruction loss keeps the projector invertible. There are
@@ -150,13 +151,13 @@ Two datasets:
 
 ```bash
 # synthetic ring
-./train_ring.py --dataset line --op filmr_expm --nd 3
+./train_ops.py --dataset line --op filmr_expm --nd 3
 
 # MNIST digit cycle (nd is forced to the VAE latent dim, 16)
-./train_ring.py --dataset mnist --op filmr_expm --epochs 500
+./train_ops.py --dataset mnist --op filmr_expm --epochs 500
 
 # using a config file (CLI args override)
-./train_ring.py --config mnist_filmr.yaml --epochs 200
+./train_ops.py --config mnist_filmr.yaml --epochs 200
 ```
 
 Both scripts accept `--config <file.yaml>` (via
@@ -219,7 +220,7 @@ hoplas/
   viz.py          3-D embedding scatter for W&B
   inference.py    checkpoint → MNIST grid transform demo
 train_simple_rot.py   supervised rotation benchmark
-train_ring.py         self-supervised ring task (main experiment)
+train_ops.py         self-supervised ring task (main experiment)
 run_simple_rot.sh     sweep + results table for the benchmark
 scripts/encode_mnist.py   one-time MNIST→latent encoding
 tests/                pytest sanity checks
