@@ -174,20 +174,54 @@ def train(args):
     split = lambda ps: ([p for p in ps if p.ndim >= 2], [p for p in ps if p.ndim < 2])
     other_decay, other_nodecay = split(other_params)
     op_decay, op_nodecay = split(op_params)
-    optimizer = torch.optim.AdamW([
-        {"params": other_decay,  "weight_decay": args.weight_decay, "lr": args.lr},
-        {"params": other_nodecay, "weight_decay": 0.0,             "lr": args.lr},
-        {"params": op_decay,     "weight_decay": args.weight_decay, "lr": op_lr},
-        {"params": op_nodecay,   "weight_decay": 0.0,             "lr": op_lr},
+    # Two separate optimizers (GAN-style): the op(s) step --op-steps times per projector step, so the
+    # transform can move faster than the geometry. opt_proj = proj+inv_proj; opt_op = trans_op+sec_heads.
+    opt_proj = torch.optim.AdamW([
+        {"params": other_decay,  "weight_decay": args.weight_decay},
+        {"params": other_nodecay, "weight_decay": 0.0},
     ], lr=args.lr)
-    plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=args.lr_patience, min_lr=args.lr / 20)
-    warmup = (torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=args.warmup_start_lr / args.lr, total_iters=args.warmup)
-        if args.warmup > 0 else None)  # constructing this immediately scales optimizer LRs down to the start
-    scheduler = WarmupThenPlateauWithReduction(warmup, plateau, args.warmup)
+    opt_op = torch.optim.AdamW([
+        {"params": op_decay,   "weight_decay": args.weight_decay},
+        {"params": op_nodecay, "weight_decay": 0.0},
+    ], lr=op_lr)
+
+    def make_sched(opt, base_lr):
+        plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, mode="min", factor=0.5, patience=args.lr_patience, min_lr=base_lr / 20)
+        warmup = (torch.optim.lr_scheduler.LinearLR(
+            opt, start_factor=args.warmup_start_lr / base_lr, total_iters=args.warmup)
+            if args.warmup > 0 else None)
+        return WarmupThenPlateauWithReduction(warmup, plateau, args.warmup)
+    sched_proj = make_sched(opt_proj, args.lr)
+    sched_op = make_sched(opt_op, op_lr)
     sim_fn = nn.MSELoss()
     sim_ema = None  # smoothed sim for the scheduler (sigreg flattens, so don't anneal on total)
+
+    def compute_loss(xb, yb, labels, epoch):
+        """Full forward + loss (primary terms + detached secondary heads). Returns (loss, comp-dict)."""
+        xproj, yproj = proj(xb), proj(yb)                  # project into new space
+        xproj_t = trans_op(xproj)                          # transform/rotate
+        xprime, yprime = inv_proj(xproj), inv_proj(yproj)  # reconstruct both from embedding
+        sim_loss = sim_fn(xproj_t, yproj)                  # weak per-sample anchor: where the cloud goes
+        mom_loss = MomMatchLoss(xproj_t, yproj, labels=labels,
+                                diag=args.mom_diag, cov_weight=args.mom_cov_weight)  # match cloud shape
+        # SIGReg each cloud independently (not on the cat): the joint test lets a collapsed
+        # xproj_t hide inside yproj's spread, halving the anti-collapse pressure
+        sigreg_loss = 0.5 * (SIGReg(xproj_t, global_step=epoch) + SIGReg(yproj, global_step=epoch))
+        recon_loss = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))  # inv_proj sees both x and y
+        loss = (1 - args.lambd) * (args.lambda_sim * sim_loss + args.lambda_mom * mom_loss) + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
+        # secondary heads: supervised sim on their own target; detached so they don't reshape the geometry
+        sec_sim = 0.0
+        for h in sec_heads:
+            src = xproj.detach() if h["detach"] else xproj
+            h_tgt = proj(dataset.sample_target(labels, h["target"])).detach()
+            sec_sim = sec_sim + sim_fn(h["op"](src), h_tgt)
+        if sec_heads:
+            loss = loss + (1 - args.lambd) * args.lambda_sim * sec_sim
+        comp = {"loss": float(loss), "sim": float(sim_loss), "mom": float(mom_loss),
+                "sigreg": float(sigreg_loss), "recon": float(recon_loss),
+                "sec_sim": float(sec_sim) if sec_heads else 0.0}
+        return loss, comp
 
     # load VAE + cache test grid once for periodic inference viz
     vae, viz_imgs = None, None
@@ -205,37 +239,25 @@ def train(args):
             pbar = tqdm(loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
             for x, y in pbar:
                 xb, yb = x['data'].to(device), y['data'].to(device)
-                optimizer.zero_grad()
-                xproj, yproj = proj(xb), proj(yb)  # project into new space
-                xproj_t = trans_op(xproj)          # transform/rotate
-                xprime, yprime = inv_proj(xproj), inv_proj(yproj)  # reconstruct both from embedding
-                sim_loss = sim_fn(xproj_t, yproj) # weak per-sample anchor: sets *where* the cloud goes
-                mom_loss = MomMatchLoss(xproj_t, yproj, labels=x['label'].to(device),
-                                        diag=args.mom_diag, cov_weight=args.mom_cov_weight)  # match cloud *shape*
-                # SIGReg each cloud independently (not on the cat): the joint test lets a
-                # collapsed xproj_t hide inside yproj's spread, halving the anti-collapse pressure
-                sigreg_loss = 0.5 * (SIGReg(xproj_t, global_step=epoch) + SIGReg(yproj, global_step=epoch))
-                recon_loss = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))  # inv_proj sees both x and y
-                loss = (1 - args.lambd) * (args.lambda_sim * sim_loss + args.lambda_mom * mom_loss) + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
-                # secondary heads: supervised sim on their own target; detached so they don't reshape the geometry
-                sec_sim = 0.0
-                for h in sec_heads:
-                    src = xproj.detach() if h["detach"] else xproj
-                    h_tgt = proj(dataset.sample_target(x['label'].to(device), h["target"])).detach()
-                    sec_sim = sec_sim + sim_fn(h["op"](src), h_tgt)
-                if sec_heads:
-                    loss = loss + (1 - args.lambd) * args.lambda_sim * sec_sim
+                labels = x['label'].to(device)
+                # op phase: --op-steps backprop steps that move only the transform(s) (fresh forward each)
+                for _ in range(args.op_steps):
+                    opt_proj.zero_grad(); opt_op.zero_grad()
+                    loss, _ = compute_loss(xb, yb, labels, epoch)
+                    loss.backward()
+                    opt_op.step()
+                # projector phase: one step moving only proj+inv_proj
+                opt_proj.zero_grad(); opt_op.zero_grad()
+                loss, comp = compute_loss(xb, yb, labels, epoch)
                 loss.backward()
-                optimizer.step()
+                opt_proj.step()
                 bs = xb.size(0)
-                for k, v in zip(totals, [loss, sim_loss, mom_loss, sigreg_loss, recon_loss]):
-                    totals[k] += v.item() * bs
-                if sec_heads:
-                    totals["sec_sim"] += float(sec_sim) * bs
-                pbar.set_postfix(loss=f"{loss.item():.6f}")
+                for k in totals:
+                    totals[k] += comp[k] * bs
+                pbar.set_postfix(loss=f"{comp['loss']:.6f}")
             avg = {k: v / len(dataset) for k, v in totals.items()}
             sim_ema = avg["sim"] if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg["sim"]
-            scheduler.step(sim_ema, epoch)  # warmup ramp, then anneal on smoothed sim (sigreg flattens by design)
+            sched_proj.step(sim_ema, epoch); sched_op.step(sim_ema, epoch)  # warmup ramp, then anneal on smoothed sim
             op_angle = trans_op.op.rotation_angle_deg() if args.op == "filmr_expm" else None
             angle_str = f"  angle={op_angle:.2f}deg" if op_angle is not None else ""
             print(f"epoch {epoch:4d}/{args.epochs}  loss={avg['loss']:.6f}  sim={avg['sim']:.6f}  mom={avg['mom']:.6f}  sigreg={avg['sigreg']:.6f}  recon={avg['recon']:.6f}{angle_str}")
@@ -254,7 +276,8 @@ def train(args):
                                 "sec_ops": {h["name"]: h["op"].state_dict() for h in sec_heads}}, ckpt_path)
 
             if wandb.run is not None:
-                log = {"epoch": epoch, "loss": avg["loss"], "lr": optimizer.param_groups[0]["lr"],
+                log = {"epoch": epoch, "loss": avg["loss"], "lr": opt_proj.param_groups[0]["lr"],
+                       "op_lr": opt_op.param_groups[0]["lr"],
                        "sim_loss": avg["sim"], "sim_ema": sim_ema, "mom_loss": avg["mom"],
                        "sigreg_loss": avg["sigreg"], "recon_loss": avg["recon"]}
                 if sec_heads:
@@ -329,6 +352,8 @@ def main():
                    help="Separate LR for trans_op (default: same as --lr). Lower it to slow the angle's climb.")
     p.add_argument("--op-resid", action=argparse.BooleanOptionalAction, default=True,
                    help="Wrap trans_op as x + op(x) (centers transform at identity; good for many ring points)")
+    p.add_argument("--op-steps", type=int, default=2,
+                   help="Op-optimizer backprop steps per projector step (GAN-style; 1 = alternate 1:1)")
     p.add_argument("--order", type=int, default=4,
                    help="Hypercomplex order n for PHMLinear (nd must be divisible by order)")
     p.add_argument("--pnd", type=int, default=None,
