@@ -47,7 +47,7 @@ for CONFIG in "${CONFIGS[@]}"; do
     # inject nd<N> (read from inside the config) into the log name so nd3 vs nd16 runs are distinguishable
     ND=$(grep -E '^[[:space:]]*nd[[:space:]]*=' "${CONFIG}" 2>/dev/null | head -1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')
     LOG_NAME="${CONFIG_NAME}"
-    [[ -n "$ND" ]] && LOG_NAME=$(echo "${CONFIG_NAME}" | sed -E "s/^(line_[a-z]+_)/\\1nd${ND}_/")
+    [[ -n "$ND" && "$CONFIG_NAME" != *_nd* ]] && LOG_NAME=$(echo "${CONFIG_NAME}" | sed -E "s/^(line_[a-z]+_)/\\1nd${ND}_/")
     LOG="${REMOTE_REPO}/logs/${LOG_NAME}.log"
 
     cat > /tmp/hoplas_run.sh << EOF

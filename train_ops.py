@@ -2,6 +2,7 @@
 """Ring-task training via four model variants. (dataset/models WIP)"""
 
 import argparse
+import ast
 import configargparse
 import json
 import os
@@ -32,7 +33,7 @@ def freeze_quaternion(ph_layer):
     ph_layer.a.data.copy_(H)
     ph_layer.a.requires_grad_(False)
 from hoplas.vae import load_vae
-from hoplas.viz import embedding_scatter3d
+from hoplas.viz import embedding_scatter3d, fit_pca, SECONDARY_SCALES
 
 
 class WarmupThenPlateauWithReduction:
@@ -54,12 +55,15 @@ class WarmupThenPlateauWithReduction:
 
 
 @torch.no_grad()
-def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_viz=0):
+def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_viz=0,
+             sec_heads=(), dataset=None):
     """Run the same losses over a held-out loader (no grad) for generalization metrics.
-    If max_viz > 0, also accumulates up to max_viz projected points for visualization."""
+    If max_viz > 0, also accumulates up to max_viz projected points for visualization
+    (primary op, plus each secondary head's output/target for its own scatter)."""
     proj.eval(); trans_op.eval(); inv_proj.eval()
     n = tot_loss = tot_sim = tot_mom = tot_sigreg = tot_recon = tot_va = tot_vb = 0.0
     viz_y, viz_xt, viz_yl, viz_xl, viz_n = [], [], [], [], 0
+    sec_y = [[] for _ in sec_heads]; sec_xt = [[] for _ in sec_heads]
     for x, y in loader:
         xb, yb = x['data'].to(device), y['data'].to(device)
         xproj, yproj = proj(xb), proj(yb)
@@ -78,12 +82,17 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
         if max_viz > 0 and viz_n < max_viz:
             viz_y.append(yproj); viz_xt.append(xproj_t)
             viz_yl.append(y['label']); viz_xl.append(x['label'])
+            for hi, h in enumerate(sec_heads):
+                sec_xt[hi].append(h["op"](xproj))
+                sec_y[hi].append(proj(dataset.sample_target(x['label'].to(device), h["target"])))
             viz_n += bs
     proj.train(); trans_op.train(); inv_proj.train()
     losses = (tot_loss / n, tot_sim / n, tot_mom / n, tot_sigreg / n, tot_recon / n)
     var_stats = {"var_xproj_t": tot_va / n, "var_yproj": tot_vb / n}
     viz = (torch.cat(viz_y), torch.cat(viz_xt), torch.cat(viz_yl), torch.cat(viz_xl)) if viz_y else None
-    return losses, var_stats, viz
+    # per secondary head: (y2proj, xproj_t2); labels reuse the source labels (viz_xl)
+    sec_viz = [(torch.cat(sy), torch.cat(sx)) for sy, sx in zip(sec_y, sec_xt)] if viz_y else []
+    return losses, var_stats, viz, sec_viz
 
 
 def train(args):
@@ -113,12 +122,13 @@ def train(args):
     if args.tag:
         op_part = f"{op_part}_{args.tag}"
     if args.dataset == "line":
-        # nd varies for line (3 vs 16, ...) so disambiguate. The project (line-{target}) already
-        # conveys dataset+target, so omit that prefix from the wandb run name; keep it in the filename.
+        # nd varies for line (3 vs 16, ...) so disambiguate. The project already conveys dataset+kind,
+        # so omit that prefix from the wandb run name; keep it in the filename. Multi-head run = dihedral.
         op_part = f"nd{args.nd}_{op_part}"
+        line_kind = "dihedral" if (args.op_list and len(args.op_list) > 1) else args.target
         wandb_name = op_part
-        ckpt_name = f"line_{args.target}_{op_part}"
-        project = f"line-{args.target}"
+        ckpt_name = f"line_{line_kind}_{op_part}"
+        project = f"line-{line_kind}"
     else:
         wandb_name = ckpt_name = f"{args.dataset}_{op_part}"
         project = {"mnist": "ring-mnist", "cifar": "ring-cifar"}[args.dataset]
@@ -264,9 +274,9 @@ def train(args):
 
             do_val = args.val_every and (epoch % args.val_every == 0 or epoch == 1)
             if do_val:
-                (val_loss, val_sim, val_mom, val_sigreg, val_recon), val_vars, viz = evaluate(
+                (val_loss, val_sim, val_mom, val_sigreg, val_recon), val_vars, viz, sec_viz = evaluate(
                     val_loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args,
-                    max_viz=args.max_viz_points)
+                    max_viz=args.max_viz_points, sec_heads=sec_heads, dataset=val_dataset)
                 print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  mom={val_mom:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}  var(xt/y)={val_vars['var_xproj_t']:.4f}/{val_vars['var_yproj']:.4f}")
                 if val_sim < best_val and epoch >= args.warmup:
                     best_val = val_sim
@@ -290,10 +300,18 @@ def train(args):
                                 "val_recon_loss": val_recon, **val_vars})
                     if viz is not None:
                         vy, vxt, vyl, vxl = viz
+                        # one shared PCA basis over all series so primary + secondary panels line up
+                        pca = fit_pca([vy, vxt] + [a for sv in sec_viz for a in sv])
                         log["embedding"] = embedding_scatter3d(
                             vy, vxt, epoch, args.op, args.order,
-                            yproj_labels=vyl, xproj_t_labels=vxl,
-                            max_points=args.max_viz_points)
+                            s0_labels=vyl, s1_labels=vxl, pca=pca, max_points=args.max_viz_points)
+                        for h, (s2y, s2xt) in zip(sec_heads, sec_viz):
+                            # color both series by the source label i (same color = should overlap)
+                            log[f"embedding_{h['name']}"] = embedding_scatter3d(
+                                s2y, s2xt, epoch, h["name"], None,
+                                s0_labels=vxl, s1_labels=vxl,
+                                names=("y2proj", "xproj_t2"), scales=SECONDARY_SCALES,
+                                pca=pca, max_points=args.max_viz_points)
                 if vae is not None and args.inf_every > 0 and epoch % args.inf_every == 0:
                     for m in (proj, trans_op, inv_proj): m.eval()
                     imgs_in, imgs_recon, imgs_xform = make_viz_grids(vae, proj, trans_op, inv_proj, viz_imgs)
@@ -343,11 +361,11 @@ def main():
     p.add_argument("--noise", type=float, default=0.01, help="Jitter added to each point")
     p.add_argument("--npoints", type=int, default=12, help="Number of quantized points on the line")
     p.add_argument("--op", choices=["filmr", "filmr_expm", "matop", "matop_clip", "matop2", "ph", "quat", "kquat", "kdualquat"], default="filmr_expm")
-    p.add_argument("--op-list", type=str, default=None,
-                   help='JSON list of op-head dicts, overrides --op. Entry 0 = primary head (shapes the '
-                        'projector, uses --target); later entries = secondary heads trained detached on '
-                        'their own target. e.g. \'[{"op":"ph","order":4,"target":"ring"}, '
-                        '{"op":"matop","target":"reflect","detach":true}]\'')
+    p.add_argument("--op-list", nargs="+", default=None,
+                   help='Op-head list (overrides --op), inline JSON. Entry 0 = primary head (shapes the '
+                        'projector, uses --target); later entries = secondary heads on their own target '
+                        '(detached by default). e.g. '
+                        '[{"op":"ph","order":4,"target":"ring"}, {"op":"matop","target":"reflect","detach":true}]')
     p.add_argument("--op-lr", type=float, default=None,
                    help="Separate LR for trans_op (default: same as --lr). Lower it to slow the angle's climb.")
     p.add_argument("--op-resid", action=argparse.BooleanOptionalAction, default=True,
@@ -388,15 +406,26 @@ def main():
         p.set_defaults(**{k: ck_args[k] for k in ("nd", "pnd", "n_hid", "proj_layers", "unit_norm")
                           if k in ck_args})
         main_args = p.parse_args()
-    # --op-list: parse the JSON blob (clean message on failure), then fold entry 0 into the single-op
-    # args so the existing primary-head pipeline is unchanged; entries 1+ become secondary heads.
+    # --op-list (nargs='+'): elements are dicts, JSON strings (CLI tokens), or Python-repr strings
+    # (configargparse YAML-parses the config value to dicts, then str()'s each to feed the nargs arg).
+    # Normalize to a flat list of head dicts; entry 0 folds into the single-op args below.
     if main_args.op_list:
+        heads = []
         try:
-            main_args.op_list = json.loads(main_args.op_list)
-        except (json.JSONDecodeError, ValueError) as e:
-            sys.exit(f"--op-list: parse error: {e}\n  received: {main_args.op_list!r}")
-        if not isinstance(main_args.op_list, list) or not main_args.op_list:
-            sys.exit(f"--op-list must be a non-empty JSON list of dicts; received: {main_args.op_list!r}")
+            for it in main_args.op_list:
+                if isinstance(it, dict):
+                    heads.append(it)
+                    continue
+                try:
+                    parsed = json.loads(it)          # CLI: JSON (double quotes, lowercase true)
+                except (json.JSONDecodeError, ValueError):
+                    parsed = ast.literal_eval(it)     # config: Python repr (single quotes, True)
+                heads.extend(parsed) if isinstance(parsed, list) else heads.append(parsed)
+        except (json.JSONDecodeError, ValueError, TypeError, SyntaxError) as e:
+            sys.exit(f"--op-list: could not parse {main_args.op_list!r}: {e}")
+        if not heads or not all(isinstance(h, dict) for h in heads):
+            sys.exit(f"--op-list must be a non-empty list of op dicts; got: {heads!r}")
+        main_args.op_list = heads
         p0 = main_args.op_list[0]
         main_args.op = p0["op"]
         main_args.order = p0.get("order", main_args.order)
