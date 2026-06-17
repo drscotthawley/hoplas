@@ -3,7 +3,9 @@
 
 import argparse
 import configargparse
+import json
 import os
+import sys
 import torch
 import wandb
 from tqdm import tqdm
@@ -102,16 +104,26 @@ def train(args):
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
     print(f"device={device}  op={args.op}  dataset={args.dataset}  nd={args.nd}  pnd={args.pnd}")
 
-    run_name = f"{args.op}_{args.order}" if args.op in ("ph", "quat") else args.op
+    # op identifier: op[_order|_rank] + any secondary heads + tag
+    op_part = f"{args.op}_{args.order}" if args.op in ("ph", "quat") else args.op
     if args.op in ("filmr_expm", "filmr") and args.rank != 2:
-        run_name = f"{args.op}_{args.rank}"
-    # for line dataset, encode the target (ring/reflect) into the name so runs don't collide
-    prefix = f"line_{args.target}" if args.dataset == "line" else args.dataset
-    run_name = f"{prefix}_{run_name}"
-    run_name = f"{run_name}_{args.tag}" if args.tag else run_name
-    project = {"line": f"line-{args.target}", "mnist": "ring-mnist", "cifar": "ring-cifar"}[args.dataset]
+        op_part = f"{args.op}_{args.rank}"
+    if args.op_list and len(args.op_list) > 1:
+        op_part += "".join(f"+{s['op']}_{s['target']}" for s in args.op_list[1:])
+    if args.tag:
+        op_part = f"{op_part}_{args.tag}"
+    if args.dataset == "line":
+        # nd varies for line (3 vs 16, ...) so disambiguate. The project (line-{target}) already
+        # conveys dataset+target, so omit that prefix from the wandb run name; keep it in the filename.
+        op_part = f"nd{args.nd}_{op_part}"
+        wandb_name = op_part
+        ckpt_name = f"line_{args.target}_{op_part}"
+        project = f"line-{args.target}"
+    else:
+        wandb_name = ckpt_name = f"{args.dataset}_{op_part}"
+        project = {"mnist": "ring-mnist", "cifar": "ring-cifar"}[args.dataset]
     if not args.no_wandb:
-        wandb.init(project=project, name=run_name, config=vars(args))
+        wandb.init(project=project, name=wandb_name, config=vars(args))
         # index every logged metric/media by epoch, so panel sliders (incl. images) read in epochs, not steps
         wandb.define_metric("epoch")
         wandb.define_metric("*", step_metric="epoch")
@@ -134,6 +146,19 @@ def train(args):
                 p.requires_grad_(False)
         print(f"froze proj+inv_proj from {args.freeze_proj_from} (epoch {ck.get('epoch')}); training op only")
 
+    # Secondary op-heads (from --op-list entries 1+): each trains detached on its own target, riding
+    # on the geometry the primary (trans_op) shapes, without back-propagating into proj/inv_proj.
+    sec_heads = []
+    for spec in (args.op_list[1:] if args.op_list else []):
+        op = OpWrapper(spec["op"], args.pnd, spec.get("order", args.order),
+                       spec.get("op_resid", args.op_resid), spec.get("rank", args.rank),
+                       args.unit_norm).to(device)
+        sec_heads.append({"op": op, "target": spec["target"],
+                          "detach": spec.get("detach", True),
+                          "name": f"{spec['op']}_{spec['target']}"})
+    if sec_heads:
+        print(f"secondary heads: {[h['name'] + ('(detach)' if h['detach'] else '') for h in sec_heads]}")
+
     n_proj, n_op, n_inv = (sum(p.numel() for p in m.parameters() if p.requires_grad) for m in [proj, trans_op, inv_proj])
     print(f"trainable params: projector={n_proj}  trans_op={n_op}  inv_proj={n_inv}")
 
@@ -145,7 +170,7 @@ def train(args):
     # closure sheet instead of overshooting it.
     op_lr = args.op_lr if args.op_lr is not None else args.lr
     other_params = list(proj.parameters()) + list(inv_proj.parameters())
-    op_params = list(trans_op.parameters())
+    op_params = list(trans_op.parameters()) + [p for h in sec_heads for p in h["op"].parameters()]
     split = lambda ps: ([p for p in ps if p.ndim >= 2], [p for p in ps if p.ndim < 2])
     other_decay, other_nodecay = split(other_params)
     op_decay, op_nodecay = split(op_params)
@@ -171,12 +196,12 @@ def train(args):
         viz_imgs = make_class_ordered_images(dataset=args.dataset).to(device)
 
     os.makedirs("checkpoints", exist_ok=True)
-    ckpt_path = os.path.join("checkpoints", f"{run_name}.pt")
+    ckpt_path = os.path.join("checkpoints", f"{ckpt_name}.pt")
     best_val = float("inf")  # tracks best val_sim (sigreg is ~constant, sim is the real quality signal)
 
     try:
         for epoch in range(1, args.epochs + 1):
-            totals = dict(loss=0.0, sim=0.0, mom=0.0, sigreg=0.0, recon=0.0)
+            totals = dict(loss=0.0, sim=0.0, mom=0.0, sigreg=0.0, recon=0.0, sec_sim=0.0)
             pbar = tqdm(loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
             for x, y in pbar:
                 xb, yb = x['data'].to(device), y['data'].to(device)
@@ -192,11 +217,21 @@ def train(args):
                 sigreg_loss = 0.5 * (SIGReg(xproj_t, global_step=epoch) + SIGReg(yproj, global_step=epoch))
                 recon_loss = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))  # inv_proj sees both x and y
                 loss = (1 - args.lambd) * (args.lambda_sim * sim_loss + args.lambda_mom * mom_loss) + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
+                # secondary heads: supervised sim on their own target; detached so they don't reshape the geometry
+                sec_sim = 0.0
+                for h in sec_heads:
+                    src = xproj.detach() if h["detach"] else xproj
+                    h_tgt = proj(dataset.sample_target(x['label'].to(device), h["target"])).detach()
+                    sec_sim = sec_sim + sim_fn(h["op"](src), h_tgt)
+                if sec_heads:
+                    loss = loss + (1 - args.lambd) * args.lambda_sim * sec_sim
                 loss.backward()
                 optimizer.step()
                 bs = xb.size(0)
                 for k, v in zip(totals, [loss, sim_loss, mom_loss, sigreg_loss, recon_loss]):
                     totals[k] += v.item() * bs
+                if sec_heads:
+                    totals["sec_sim"] += float(sec_sim) * bs
                 pbar.set_postfix(loss=f"{loss.item():.6f}")
             avg = {k: v / len(dataset) for k, v in totals.items()}
             sim_ema = avg["sim"] if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg["sim"]
@@ -211,16 +246,19 @@ def train(args):
                     val_loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args,
                     max_viz=args.max_viz_points)
                 print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  mom={val_mom:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}  var(xt/y)={val_vars['var_xproj_t']:.4f}/{val_vars['var_yproj']:.4f}")
-                if val_sim < best_val and epoch >= args.min_ckpt_epoch:
+                if val_sim < best_val and epoch >= args.warmup:
                     best_val = val_sim
                     torch.save({"epoch": epoch, "val_sim_loss": val_sim, "args": vars(args),
                                 "proj": proj.state_dict(), "inv_proj": inv_proj.state_dict(),
-                                "trans_op": trans_op.state_dict()}, ckpt_path)
+                                "trans_op": trans_op.state_dict(),
+                                "sec_ops": {h["name"]: h["op"].state_dict() for h in sec_heads}}, ckpt_path)
 
             if wandb.run is not None:
                 log = {"epoch": epoch, "loss": avg["loss"], "lr": optimizer.param_groups[0]["lr"],
                        "sim_loss": avg["sim"], "sim_ema": sim_ema, "mom_loss": avg["mom"],
                        "sigreg_loss": avg["sigreg"], "recon_loss": avg["recon"]}
+                if sec_heads:
+                    log["sec_sim_loss"] = avg["sec_sim"]
                 if op_angle is not None:
                     log["op_angle_deg"] = op_angle
                 if do_val:
@@ -272,8 +310,6 @@ def main():
     p.add_argument("--lr-patience", type=int, default=50, help="ReduceLROnPlateau patience (epochs)")
     p.add_argument("--max-viz-points", type=int, default=1000,
                    help="Max points to accumulate per epoch for the W&B embedding scatter")
-    p.add_argument("--min-ckpt-epoch", type=int, default=20,
-                   help="Don't save checkpoints before this epoch (avoids locking in spuriously low early loss)")
     p.add_argument("--mom-cov-weight", type=float, default=1.0,
                    help="Weight on the covariance term inside MomMatchLoss (mean term fixed at 1)")
     p.add_argument("--mom-diag", action="store_true",
@@ -284,6 +320,11 @@ def main():
     p.add_argument("--noise", type=float, default=0.01, help="Jitter added to each point")
     p.add_argument("--npoints", type=int, default=12, help="Number of quantized points on the line")
     p.add_argument("--op", choices=["filmr", "filmr_expm", "matop", "matop_clip", "matop2", "ph", "quat", "kquat", "kdualquat"], default="filmr_expm")
+    p.add_argument("--op-list", type=str, default=None,
+                   help='JSON list of op-head dicts, overrides --op. Entry 0 = primary head (shapes the '
+                        'projector, uses --target); later entries = secondary heads trained detached on '
+                        'their own target. e.g. \'[{"op":"ph","order":4,"target":"ring"}, '
+                        '{"op":"matop","target":"reflect","detach":true}]\'')
     p.add_argument("--op-lr", type=float, default=None,
                    help="Separate LR for trans_op (default: same as --lr). Lower it to slow the angle's climb.")
     p.add_argument("--op-resid", action=argparse.BooleanOptionalAction, default=True,
@@ -322,6 +363,21 @@ def main():
         p.set_defaults(**{k: ck_args[k] for k in ("nd", "pnd", "n_hid", "proj_layers", "unit_norm")
                           if k in ck_args})
         main_args = p.parse_args()
+    # --op-list: parse the JSON blob (clean message on failure), then fold entry 0 into the single-op
+    # args so the existing primary-head pipeline is unchanged; entries 1+ become secondary heads.
+    if main_args.op_list:
+        try:
+            main_args.op_list = json.loads(main_args.op_list)
+        except (json.JSONDecodeError, ValueError) as e:
+            sys.exit(f"--op-list: parse error: {e}\n  received: {main_args.op_list!r}")
+        if not isinstance(main_args.op_list, list) or not main_args.op_list:
+            sys.exit(f"--op-list must be a non-empty JSON list of dicts; received: {main_args.op_list!r}")
+        p0 = main_args.op_list[0]
+        main_args.op = p0["op"]
+        main_args.order = p0.get("order", main_args.order)
+        main_args.rank = p0.get("rank", main_args.rank)
+        main_args.op_resid = p0.get("op_resid", main_args.op_resid)
+        main_args.target = p0.get("target", main_args.target)
     print("Arguments:", vars(main_args))
     train(main_args)
 

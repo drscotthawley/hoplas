@@ -45,6 +45,20 @@ class LineDataset(Dataset):
         tgt[0] += self.line_vals[j]
         return {'data': inp, 'label': i}, {'data': tgt, 'label': j}
 
+    def sample_target(self, labels, target_name):
+        """Batched target data for a named operation (for multi-head training).
+        labels: (B,) long tensor of source classes i. Returns (B, nd) target data on labels.device."""
+        n = self.npoints
+        if target_name == 'ring':
+            j = (labels + 1) % n
+        elif target_name == 'reflect':
+            j = (-labels) % n
+        else:
+            raise ValueError(f"unknown target_name {target_name!r}")
+        out = self.noise * torch.randn(labels.size(0), self.nd, device=labels.device)
+        out[:, 0] += self.line_vals.to(labels.device)[j]
+        return out
+
 
 class EncodingsDataset(Dataset):
     """Pairs of precomputed VAE encodings: (class i, class i+1), with wraparound.
@@ -80,6 +94,23 @@ class EncodingsDataset(Dataset):
         tgt_idx = pool[torch.randint(len(pool), (1,)).item()]  # random sample of class j
         return ({'data': self.z[idx], 'label': i},
                 {'data': self.z[tgt_idx], 'label': j})
+
+    def sample_target(self, labels, target_name):
+        """Batched target data for a named operation (for multi-head training).
+        labels: (B,) long tensor of source classes i. Returns (B, nd) on labels.device,
+        each a random encoding of the target class."""
+        n = self.n_classes
+        if target_name == 'ring':
+            j = (labels + 1) % n
+        elif target_name == 'reflect':
+            j = (-labels) % n
+        else:
+            raise ValueError(f"unknown target_name {target_name!r}")
+        idx = torch.empty(labels.size(0), dtype=torch.long)
+        for b, jj in enumerate(j.tolist()):
+            pool = self.class_indices[jj]
+            idx[b] = pool[torch.randint(len(pool), (1,)).item()]
+        return self.z[idx].to(labels.device)
 
 
 
