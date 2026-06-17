@@ -66,7 +66,7 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
         sim = sim_fn(xproj_t, yproj)
         mom, stats = MomMatchLoss(xproj_t, yproj, labels=x['label'].to(device),
                                   diag=args.mom_diag, cov_weight=args.mom_cov_weight, return_stats=True)
-        sigreg = SIGReg(torch.cat([xproj_t, yproj], dim=0), global_step=epoch)
+        sigreg = 0.5 * (SIGReg(xproj_t, global_step=epoch) + SIGReg(yproj, global_step=epoch))
         recon = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))
         loss = (1 - args.lambd) * (args.lambda_sim * sim + args.lambda_mom * mom) + args.lambd * sigreg + args.lambda_recon * recon
         bs = xb.size(0)
@@ -123,6 +123,17 @@ def train(args):
     # inverse projector: maps pnd back to nd (unit_norm=False: output isn't on the sphere)
     inv_proj = Projector(nd=args.pnd, pnd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, unit_norm=False).to(device)
 
+    # Frozen-geometry mode: load proj/inv_proj weights and freeze them, so only the op trains against
+    # the fixed embedding (pure supervised). recon becomes constant. Geometry args were inherited as
+    # defaults in main() (config still overrides), so the projector dims here match the checkpoint.
+    if args.freeze_proj_from:
+        ck = torch.load(os.path.expanduser(args.freeze_proj_from), map_location=device)
+        proj.load_state_dict(ck["proj"]); inv_proj.load_state_dict(ck["inv_proj"])
+        for m in (proj, inv_proj):
+            for p in m.parameters():
+                p.requires_grad_(False)
+        print(f"froze proj+inv_proj from {args.freeze_proj_from} (epoch {ck.get('epoch')}); training op only")
+
     n_proj, n_op, n_inv = (sum(p.numel() for p in m.parameters() if p.requires_grad) for m in [proj, trans_op, inv_proj])
     print(f"trainable params: projector={n_proj}  trans_op={n_op}  inv_proj={n_inv}")
 
@@ -176,7 +187,9 @@ def train(args):
                 sim_loss = sim_fn(xproj_t, yproj) # weak per-sample anchor: sets *where* the cloud goes
                 mom_loss = MomMatchLoss(xproj_t, yproj, labels=x['label'].to(device),
                                         diag=args.mom_diag, cov_weight=args.mom_cov_weight)  # match cloud *shape*
-                sigreg_loss = SIGReg( torch.cat([xproj_t, yproj], dim=0), global_step=epoch )  # pull distribution toward Gaussian
+                # SIGReg each cloud independently (not on the cat): the joint test lets a
+                # collapsed xproj_t hide inside yproj's spread, halving the anti-collapse pressure
+                sigreg_loss = 0.5 * (SIGReg(xproj_t, global_step=epoch) + SIGReg(yproj, global_step=epoch))
                 recon_loss = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))  # inv_proj sees both x and y
                 loss = (1 - args.lambd) * (args.lambda_sim * sim_loss + args.lambda_mom * mom_loss) + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
                 loss.backward()
@@ -242,22 +255,25 @@ def main():
     p.add_argument("--dataset", choices=["line", "mnist", "cifar"], default="line",
                    help="line=synthetic ring; mnist/cifar=VAE encodings (nd forced by dataset)")
     p.add_argument("--epochs", type=int, default=1000)
-    p.add_argument("--min-ckpt-epoch", type=int, default=20,
-                   help="Don't save checkpoints before this epoch (avoids locking in spuriously low early loss)")
+    p.add_argument("--freeze-proj-from", type=str, default=None,
+                   help="Load proj+inv_proj from this checkpoint and freeze them; train only the op "
+                        "on the fixed geometry (supervised). Use with --target reflect, lambd=0, lambda_mom=0.")
     p.add_argument("--inf-every", type=int, default=20,
                    help="Log MNIST inference grids to W&B every N epochs (0 disables; mnist only)")
     p.add_argument("--lambd", type=float, default=0.01,
                    help="SIGReg weight: loss = (1-lambd)*sim + lambd*sigreg")
-    p.add_argument("--lambda-recon", type=float, default=1.0,
-                   help="Weight on inv_proj autoencoder reconstruction loss (0 disables)")
     p.add_argument("--lambda-mom", type=float, default=0.5,
                    help="Weight on MomMatch inside the non-sigreg group (0 disables; high values can merge classes)")
+    p.add_argument("--lambda-recon", type=float, default=1.0,
+                   help="Weight on inv_proj autoencoder reconstruction loss (0 disables)")
     p.add_argument("--lambda-sim", type=float, default=0.5,
                    help="Weight on MSE sim inside the non-sigreg group: (1-lambd)*(lambda_sim*sim + lambda_mom*mom)")
     p.add_argument("--lr", type=float, default=0.002)
     p.add_argument("--lr-patience", type=int, default=50, help="ReduceLROnPlateau patience (epochs)")
     p.add_argument("--max-viz-points", type=int, default=1000,
                    help="Max points to accumulate per epoch for the W&B embedding scatter")
+    p.add_argument("--min-ckpt-epoch", type=int, default=20,
+                   help="Don't save checkpoints before this epoch (avoids locking in spuriously low early loss)")
     p.add_argument("--mom-cov-weight", type=float, default=1.0,
                    help="Weight on the covariance term inside MomMatchLoss (mean term fixed at 1)")
     p.add_argument("--mom-diag", action="store_true",
@@ -267,8 +283,6 @@ def main():
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--noise", type=float, default=0.01, help="Jitter added to each point")
     p.add_argument("--npoints", type=int, default=12, help="Number of quantized points on the line")
-    p.add_argument("--target", choices=["ring", "reflect"], default="ring",
-                   help="LineDataset target: ring (cyclic T) or reflect (dihedral inversion I)")
     p.add_argument("--op", choices=["filmr", "filmr_expm", "matop", "matop_clip", "matop2", "ph", "quat", "kquat", "kdualquat"], default="filmr_expm")
     p.add_argument("--op-lr", type=float, default=None,
                    help="Separate LR for trans_op (default: same as --lr). Lower it to slow the angle's climb.")
@@ -287,6 +301,8 @@ def main():
     p.add_argument("--sim-ema", type=float, default=0.8,
                    help="EMA decay for smoothing sim before the LR scheduler")
     p.add_argument("--tag", type=str, default="", help="tag to append to wandb run name")
+    p.add_argument("--target", choices=["ring", "reflect"], default="ring",
+                   help="LineDataset target: ring (cyclic T) or reflect (dihedral inversion I)")
     p.add_argument("--unit-norm", action=argparse.BooleanOptionalAction, default=True,
                    help="L2-normalize projector output onto the unit sphere")
     p.add_argument("--val-every", type=int, default=4,
@@ -298,6 +314,14 @@ def main():
     p.add_argument("--weight-decay", type=float, default=1e-4,
                    help="Weight decay on >=2D weights (helps FiLMR_expm precision drift)")
     main_args = p.parse_args()
+    # Frozen-geometry mode: seed the projector-architecture args from the checkpoint as new *defaults*,
+    # then re-parse so config/CLI still win for any key you do state. Omit these from the config and
+    # they fall back to the checkpoint (so the frozen projector dims/behavior match the saved weights).
+    if main_args.freeze_proj_from:
+        ck_args = torch.load(os.path.expanduser(main_args.freeze_proj_from), map_location="cpu")["args"]
+        p.set_defaults(**{k: ck_args[k] for k in ("nd", "pnd", "n_hid", "proj_layers", "unit_norm")
+                          if k in ck_args})
+        main_args = p.parse_args()
     print("Arguments:", vars(main_args))
     train(main_args)
 
