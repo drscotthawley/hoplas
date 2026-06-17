@@ -85,7 +85,12 @@ launch_next() {
     local config="${QUEUE[$QUEUE_IDX]}"
     QUEUE_IDX=$((QUEUE_IDX + 1))
     local remote_config="${REMOTE_REPO}/configs/${config}.cfg"
-    local log="${REMOTE_REPO}/logs/${config}.log"
+    # inject nd<N> (read from inside the config) into the log name so nd3 vs nd16 runs are distinguishable
+    local nd log_name
+    nd=$(grep -E '^[[:space:]]*nd[[:space:]]*=' "${REPO_DIR}/configs/${config}.cfg" 2>/dev/null | head -1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')
+    log_name="${config}"
+    [[ -n "$nd" ]] && log_name=$(echo "${config}" | sed -E "s/^(line_[a-z]+_)/\\1nd${nd}_/")
+    local log="${REMOTE_REPO}/logs/${log_name}.log"
 
     cat > /tmp/hoplas_run.sh << EOF
 #!/bin/bash

@@ -44,7 +44,11 @@ fi
 for CONFIG in "${CONFIGS[@]}"; do
     CONFIG_NAME=$(basename "${CONFIG}" .cfg)
     REMOTE_CONFIG="${REMOTE_REPO}/configs/$(basename "${CONFIG}")"
-    LOG="${REMOTE_REPO}/logs/${CONFIG_NAME}.log"
+    # inject nd<N> (read from inside the config) into the log name so nd3 vs nd16 runs are distinguishable
+    ND=$(grep -E '^[[:space:]]*nd[[:space:]]*=' "${CONFIG}" 2>/dev/null | head -1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')
+    LOG_NAME="${CONFIG_NAME}"
+    [[ -n "$ND" ]] && LOG_NAME=$(echo "${CONFIG_NAME}" | sed -E "s/^(line_[a-z]+_)/\\1nd${ND}_/")
+    LOG="${REMOTE_REPO}/logs/${LOG_NAME}.log"
 
     cat > /tmp/hoplas_run.sh << EOF
 #!/bin/bash
