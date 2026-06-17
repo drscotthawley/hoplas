@@ -50,9 +50,9 @@ def embedding_scatter3d(yproj, xproj_t, epoch, method, order=None,
     labels = {k: (v[idx] if v is not None else None) for k, v in labels.items()}
 
     nd = next(iter(data.values())).shape[1]
-    if nd == 3:
-        # already 3D -- plot raw coords, no PCA
-        proj = data
+    if nd <= 3:
+        # already <=3D -- plot raw coords (no PCA), zero-padding to 3 cols when nd<3
+        proj = {k: np.pad(a, ((0, 0), (0, 3 - a.shape[1]))) for k, a in data.items()}
         axis_titles = ("dim0", "dim1", "dim2")
     else:
         # shared PCA to 3D, fit on both series together
