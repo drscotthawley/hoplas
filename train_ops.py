@@ -63,7 +63,7 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
     proj.eval(); trans_op.eval(); inv_proj.eval()
     n = tot_loss = tot_sim = tot_mom = tot_sigreg = tot_recon = tot_va = tot_vb = 0.0
     viz_y, viz_xt, viz_yl, viz_xl, viz_n = [], [], [], [], 0
-    sec_y = [[] for _ in sec_heads]; sec_xt = [[] for _ in sec_heads]
+    sec_y = [[] for _ in sec_heads]; sec_xt = [[] for _ in sec_heads]; sec_yl = [[] for _ in sec_heads]
     for x, y in loader:
         xb, yb = x['data'].to(device), y['data'].to(device)
         xproj, yproj = proj(xb), proj(yb)
@@ -84,14 +84,16 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
             viz_yl.append(y['label']); viz_xl.append(x['label'])
             for hi, h in enumerate(sec_heads):
                 sec_xt[hi].append(h["op"](xproj))
-                sec_y[hi].append(proj(dataset.sample_target(x['label'].to(device), h["target"])))
+                tgt_data, tgt_lab = dataset.sample_target(x['label'].to(device), h["target"])
+                sec_y[hi].append(proj(tgt_data)); sec_yl[hi].append(tgt_lab)
             viz_n += bs
     proj.train(); trans_op.train(); inv_proj.train()
     losses = (tot_loss / n, tot_sim / n, tot_mom / n, tot_sigreg / n, tot_recon / n)
     var_stats = {"var_xproj_t": tot_va / n, "var_yproj": tot_vb / n}
     viz = (torch.cat(viz_y), torch.cat(viz_xt), torch.cat(viz_yl), torch.cat(viz_xl)) if viz_y else None
-    # per secondary head: (y2proj, xproj_t2); labels reuse the source labels (viz_xl)
-    sec_viz = [(torch.cat(sy), torch.cat(sx)) for sy, sx in zip(sec_y, sec_xt)] if viz_y else []
+    # per secondary head: (y2proj, xproj_t2, y2proj_labels=target class -i)
+    sec_viz = [(torch.cat(sy), torch.cat(sx), torch.cat(syl))
+               for sy, sx, syl in zip(sec_y, sec_xt, sec_yl)] if viz_y else []
     return losses, var_stats, viz, sec_viz
 
 
@@ -224,7 +226,7 @@ def train(args):
         sec_sim = 0.0
         for h in sec_heads:
             src = xproj.detach() if h["detach"] else xproj
-            h_tgt = proj(dataset.sample_target(labels, h["target"])).detach()
+            h_tgt = proj(dataset.sample_target(labels, h["target"])[0]).detach()
             sec_sim = sec_sim + sim_fn(h["op"](src), h_tgt)
         if sec_heads:
             loss = loss + (1 - args.lambd) * args.lambda_sim * sec_sim
@@ -301,15 +303,16 @@ def train(args):
                     if viz is not None:
                         vy, vxt, vyl, vxl = viz
                         # one shared PCA basis over all series so primary + secondary panels line up
-                        pca = fit_pca([vy, vxt] + [a for sv in sec_viz for a in sv])
+                        pca = fit_pca([vy, vxt] + [a for s2y, s2xt, _ in sec_viz for a in (s2y, s2xt)])
                         log["embedding"] = embedding_scatter3d(
                             vy, vxt, epoch, args.op, args.order,
                             s0_labels=vyl, s1_labels=vxl, pca=pca, max_points=args.max_viz_points)
-                        for h, (s2y, s2xt) in zip(sec_heads, sec_viz):
-                            # color both series by the source label i (same color = should overlap)
+                        for h, (s2y, s2xt, s2yl) in zip(sec_heads, sec_viz):
+                            # like the primary: output (green=xproj_t2) by source label i, target
+                            # (purple=y2proj) by its own label j (=-i for reflect) -> shows the i->-i pairing
                             log[f"embedding_{h['name']}"] = embedding_scatter3d(
                                 s2y, s2xt, epoch, h["name"], None,
-                                s0_labels=vxl, s1_labels=vxl,
+                                s0_labels=s2yl, s1_labels=vxl,
                                 names=("y2proj", "xproj_t2"), scales=SECONDARY_SCALES,
                                 pca=pca, max_points=args.max_viz_points)
                 if vae is not None and args.inf_every > 0 and epoch % args.inf_every == 0:

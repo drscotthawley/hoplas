@@ -46,8 +46,8 @@ class LineDataset(Dataset):
         return {'data': inp, 'label': i}, {'data': tgt, 'label': j}
 
     def sample_target(self, labels, target_name):
-        """Batched target data for a named operation (for multi-head training).
-        labels: (B,) long tensor of source classes i. Returns (B, nd) target data on labels.device."""
+        """Batched target data + labels for a named operation (for multi-head training).
+        labels: (B,) source classes i. Returns (data (B,nd), target_labels j (B,)) on labels.device."""
         n = self.npoints
         if target_name == 'ring':
             j = (labels + 1) % n
@@ -57,7 +57,7 @@ class LineDataset(Dataset):
             raise ValueError(f"unknown target_name {target_name!r}")
         out = self.noise * torch.randn(labels.size(0), self.nd, device=labels.device)
         out[:, 0] += self.line_vals.to(labels.device)[j]
-        return out
+        return out, j
 
 
 class EncodingsDataset(Dataset):
@@ -96,9 +96,9 @@ class EncodingsDataset(Dataset):
                 {'data': self.z[tgt_idx], 'label': j})
 
     def sample_target(self, labels, target_name):
-        """Batched target data for a named operation (for multi-head training).
-        labels: (B,) long tensor of source classes i. Returns (B, nd) on labels.device,
-        each a random encoding of the target class."""
+        """Batched target data + labels for a named operation (for multi-head training).
+        labels: (B,) source classes i. Returns (data (B,nd), target_labels j (B,)) on labels.device;
+        data is a random encoding of each target class."""
         n = self.n_classes
         if target_name == 'ring':
             j = (labels + 1) % n
@@ -110,7 +110,7 @@ class EncodingsDataset(Dataset):
         for b, jj in enumerate(j.tolist()):
             pool = self.class_indices[jj]
             idx[b] = pool[torch.randint(len(pool), (1,)).item()]
-        return self.z[idx].to(labels.device)
+        return self.z[idx].to(labels.device), j.to(labels.device)
 
 
 
@@ -210,3 +210,65 @@ def make_loaders_cifar10(batch_size=256, precomputed_train_dir=None,
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=num_workers)
     test_loader = DataLoader(ds_test, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     return train_loader, test_loader
+
+
+class KGTripleDataset(Dataset):
+    """Knowledge-graph triples (head, relation, tail) as integer IDs, for the
+    "relation as a learnable group action" view of the ring task.
+
+    Each item is a triple ``(h, r, t)`` (LongTensor of 3): the relation ``r``
+    transforms head entity ``h`` into tail entity ``t``. Entities are *not* given
+    as coordinates here (unlike LineDataset); the trainer owns a learnable entity
+    embedding table indexed by these IDs, and a per-relation operator. SIGReg on the
+    entity cloud replaces negative sampling as the anti-collapse force.
+
+    Canonical entity/relation IDs and the standard train/valid/test splits are
+    sourced once from PyKEEN's bundled dataset (download + caching only — no PyKEEN
+    training/eval machinery). ``create_inverse=True`` appends, for every (h, r, t),
+    the inverse triple (t, r + num_base_relations, h) so head prediction is just tail
+    prediction under the inverse relation.
+
+    Shared vocabulary: build the *train* split first, then pass its
+    ``.entity_to_id`` / ``.relation_to_id`` (via ``from_dataset``) so valid/test use
+    identical IDs.
+    """
+
+    def __init__(self, name="WN18RR", split="train", create_inverse=True, debug=True):
+        super().__init__()
+        from pykeen.datasets import get_dataset  # data sourcing only
+        ds = get_dataset(dataset=name)
+        factory = {"train": ds.training, "valid": ds.validation, "test": ds.testing}[split]
+        self.name, self.split, self.create_inverse = name, split, create_inverse
+        self.entity_to_id = ds.training.entity_to_id
+        self.relation_to_id = ds.training.relation_to_id
+        self.num_entities = ds.training.num_entities
+        self.num_base_relations = ds.training.num_relations
+        self.num_relations = self.num_base_relations * (2 if create_inverse else 1)
+
+        base = factory.mapped_triples.long()  # (T, 3) columns: head, relation, tail
+        if create_inverse:
+            inv = base[:, [2, 1, 0]].clone()
+            inv[:, 1] += self.num_base_relations
+            self.triples = torch.cat([base, inv], dim=0)
+        else:
+            self.triples = base
+        if debug:
+            print(f"KGTripleDataset[{name}/{split}]: {len(self.triples)} triples "
+                  f"(inverse={create_inverse})  num_entities={self.num_entities}  "
+                  f"num_relations={self.num_relations}")
+
+    def __len__(self):
+        return self.triples.size(0)
+
+    def __getitem__(self, idx):
+        return self.triples[idx]  # LongTensor (3,): (h, r, t)
+
+    def true_tails(self, all_splits):
+        """Map (h, r) -> set of true tails, pooled over the given datasets, for
+        filtered ranking at eval time. `all_splits`: iterable of KGTripleDataset."""
+        from collections import defaultdict
+        hr2t = defaultdict(set)
+        for ds in all_splits:
+            for h, r, t in ds.triples.tolist():
+                hr2t[(h, r)].add(t)
+        return hr2t

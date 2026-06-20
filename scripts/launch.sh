@@ -28,7 +28,7 @@ echo "Syncing source to ${HOST}:${REMOTE_REPO}..."
 rsync -az --exclude='*.pyc' --exclude='__pycache__' --exclude='.git' \
     --exclude='wandb' --exclude='checkpoints' --exclude='*.pt' \
     "${REPO_DIR}/hoplas/" "${HOST}:${REMOTE_REPO}/hoplas/"
-rsync -az "${REPO_DIR}/train_ops.py" "${HOST}:${REMOTE_REPO}/"
+rsync -az "${REPO_DIR}/train_ops.py" "${REPO_DIR}/train_kge.py" "${HOST}:${REMOTE_REPO}/"
 rsync -az "${REPO_DIR}/configs/" "${HOST}:${REMOTE_REPO}/configs/"
 $SSH "${HOST}" "mkdir -p ${REMOTE_REPO}/logs ${REMOTE_REPO}/checkpoints"
 
@@ -44,6 +44,8 @@ fi
 for CONFIG in "${CONFIGS[@]}"; do
     CONFIG_NAME=$(basename "${CONFIG}" .cfg)
     REMOTE_CONFIG="${REMOTE_REPO}/configs/$(basename "${CONFIG}")"
+    # task-aware: kge_*.cfg -> train_kge.py (KGE task); everything else -> train_ops.py (ring task)
+    [[ "$CONFIG_NAME" == kge_* ]] && TRAIN_SCRIPT="train_kge.py" || TRAIN_SCRIPT="train_ops.py"
     # inject nd<N> (read from inside the config) into the log name so nd3 vs nd16 runs are distinguishable
     ND=$(grep -E '^[[:space:]]*nd[[:space:]]*=' "${CONFIG}" 2>/dev/null | head -1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')
     LOG_NAME="${CONFIG_NAME}"
@@ -54,7 +56,7 @@ for CONFIG in "${CONFIGS[@]}"; do
 #!/bin/bash
 source ${REMOTE_ENV}/bin/activate
 cd ${REMOTE_REPO}
-CUDA_VISIBLE_DEVICES=${GPU} nohup python train_ops.py --config ${REMOTE_CONFIG} \
+CUDA_VISIBLE_DEVICES=${GPU} nohup python ${TRAIN_SCRIPT} --config ${REMOTE_CONFIG} \
     > ${LOG} 2>&1 &
 echo \$!
 EOF
