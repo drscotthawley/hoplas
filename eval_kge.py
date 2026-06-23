@@ -113,82 +113,78 @@ def mrr_hits(ranks):
 # Test 1: Multi-hop path queries
 # ---------------------------------------------------------------------------
 
-def sample_path_queries(adj, k, n_queries=2000, seed=42):
-    """Sample k-hop queries: list of (h, [r1...rk], answer_set).
-    Tries random starting pairs and extensions until n_queries found."""
+def _sample_path_queries_fast(adj, all_rel_ids, k, n_queries=2000, seed=42,
+                              test_pairs=None, test_hr2t=None):
+    """Sample k-hop path queries. Returns (h, rels, targets, filt) tuples.
+
+    Starting (h, r1) pairs are drawn from distinct test (h, r) pairs so the eval
+    is not contaminated by training examples. Path extensions for k≥2 use adj
+    (all splits) to traverse the full known graph (Guu et al. path-query task).
+
+    targets = the entities whose rank we measure:
+      k=1   -> the held-out TEST tails of (h, r1) only (so k=1 reproduces the
+               filtered TEST MRR; train/valid tails are NOT scored).
+      k>=2  -> the full set of graph-reachable path endpoints.
+    filt = all known positives to mask out when ranking a target (the full
+      reachable set across splits, the standard filtered setting)."""
     rng = random.Random(seed)
-    pairs = list(adj.keys())
-    if not pairs:
+    if test_pairs is None or len(test_pairs) == 0:
         return []
+    # Distinct test (h, r) starting pairs that have at least one neighbour in adj.
+    valid_pairs = sorted({(h, r) for h, r in test_pairs if adj.get((h, r))})
+    if not valid_pairs:
+        return []
+    rng.shuffle(valid_pairs)
     queries = []
     attempts = 0
-    max_attempts = n_queries * 50
+    max_attempts = max(n_queries, len(valid_pairs)) * 30
+    pi = 0
     while len(queries) < n_queries and attempts < max_attempts:
         attempts += 1
-        h, r1 = rng.choice(pairs)
-        frontier = adj.get((h, r1), set())
-        if not frontier:
-            continue
+        h, r1 = valid_pairs[pi % len(valid_pairs)]
+        pi += 1
+        cur = set(adj[(h, r1)])
         rels = [r1]
-        cur = set(frontier)
         valid = True
         for _ in range(k - 1):
-            # Pick a relation that has at least one hit from the current frontier
-            candidates = [r for m in cur for r in {rk for (hk, rk) in adj if hk == m}]
-            if not candidates:
-                valid = False
-                break
-            r_next = rng.choice(candidates)
+            r_next = rng.choice(all_rel_ids)
             rels.append(r_next)
-            new_frontier = set()
-            for m in cur:
-                new_frontier.update(adj.get((m, r_next), set()))
-            if not new_frontier:
-                valid = False
-                break
-            cur = new_frontier
-        if valid and cur:
-            queries.append((h, rels, cur))
-    return queries
-
-
-def _sample_path_queries_fast(adj, all_rel_ids, k, n_queries=2000, seed=42):
-    """Faster sampler: pick random relation sequence first, then find valid starting heads.
-    Falls back gracefully when k is large or the graph is sparse."""
-    rng = random.Random(seed)
-    # collect all start entities
-    all_heads = list({h for (h, r) in adj})
-    if not all_heads:
-        return []
-    queries = []
-    attempts = 0
-    max_attempts = n_queries * 30
-    while len(queries) < n_queries and attempts < max_attempts:
-        attempts += 1
-        rels = [rng.choice(all_rel_ids) for _ in range(k)]
-        h = rng.choice(all_heads)
-        cur = {h}
-        valid = True
-        for r in rels:
             nxt = set()
             for m in cur:
-                nxt.update(adj.get((m, r), set()))
+                nxt.update(adj.get((m, r_next), set()))
             if not nxt:
                 valid = False
                 break
             cur = nxt
-        if valid and cur:
-            queries.append((h, rels, cur))
+        if not (valid and cur):
+            continue
+        if k == 1:
+            targets = test_hr2t.get((h, r1), set()) if test_hr2t else set()
+            if not targets:
+                continue
+            queries.append((h, rels, targets, cur))   # filter = all known tails
+        else:
+            queries.append((h, rels, cur, cur))        # endpoints = filter set
     return queries
 
 
 @torch.no_grad()
-def test_hop(model, adj, hr2t, all_rel_ids, device, score_mode, max_k=3, n_queries=2000):
+def test_hop(model, adj, hr2t, all_rel_ids, test_ds, device, score_mode, max_k=3, n_queries=2000):
     """Path-query MRR/Hits@k for k=1..max_k.
-    k=1 must reproduce TEST MRR as a sanity check (printed separately)."""
+    Starting (h,r) pairs are sampled from test triples only; path extensions
+    use all-split adj. k=1 should reproduce TEST MRR as a sanity check."""
+    # Build test (h, r) pairs and the test-split (h,r)->tails map (base relations only, r < R).
+    R = test_ds.num_base_relations
+    test_pairs = []
+    test_hr2t = defaultdict(set)
+    for h, r, t in test_ds.triples.tolist():
+        if r < R:
+            test_pairs.append((h, r))
+            test_hr2t[(h, r)].add(t)
     results = {}
     for k in range(1, max_k + 1):
-        queries = _sample_path_queries_fast(adj, all_rel_ids, k, n_queries=n_queries)
+        queries = _sample_path_queries_fast(adj, all_rel_ids, k, n_queries=n_queries,
+                                            test_pairs=test_pairs, test_hr2t=test_hr2t)
         if not queries:
             print(f"  hop k={k}: no queries found, skipping")
             continue
@@ -205,15 +201,13 @@ def test_hop(model, adj, hr2t, all_rel_ids, device, score_mode, max_k=3, n_queri
                 r_ids = torch.tensor([q[1][hop_idx] for q in chunk], dtype=torch.long, device=device)
                 pred = model.apply_relation(pred, r_ids)
             scores = score_matrix(model, pred, score_mode, device)
-            # For each query, answer set = multi-hop reachable entities (already computed)
-            filter_sets = [q[2] for q in chunk]
-            # Rank a random sampled target from each answer set (if multiple answers, rank all and aggregate)
+            # Rank each target (k=1: held-out test tails; k>=2: path endpoints),
+            # filtering the other known positives out (standard filtered setting).
             for b_idx, q in enumerate(chunk):
-                ans = list(q[2])
-                # For multi-answer queries: average rank over all answers (standard path-query eval)
-                for tgt in ans:
+                targets, filt = q[2], q[3]
+                for tgt in targets:
                     s = scores[b_idx].clone()
-                    others = [x for x in ans if x != tgt]
+                    others = [x for x in filt if x != tgt]
                     if others:
                         s[torch.tensor(others, device=device)] = float("-inf")
                     all_ranks.append(1 + int((s > s[tgt]).sum().item()))
@@ -296,13 +290,13 @@ def test_involution(model, datasets, hr2t, device, score_mode, n_queries=2000):
         print("  involution: no symmetric relations found")
         return {}
     print(f"  involution: {len(sym_rels)} symmetric relations")
-    # Collect triples with symmetric relations
+    # Collect test triples with symmetric relations (test-only, not train/valid)
     R = datasets[0].num_base_relations
+    test_ds = datasets[2]
     sym_triples = []
-    for ds in datasets:
-        for h, r, t in ds.triples.tolist():
-            if r < R and r in sym_rels:
-                sym_triples.append((h, r, t))
+    for h, r, t in test_ds.triples.tolist():
+        if r < R and r in sym_rels:
+            sym_triples.append((h, r, t))
     if not sym_triples:
         print("  involution: no triples with symmetric relations")
         return {}
@@ -424,7 +418,7 @@ def main():
 
     if "hop" in tests:
         print(f"\n=== Test 1: Multi-hop path queries (k=1..{args.max_k}) ===")
-        test_hop(model, adj, hr2t, all_rel_ids, device, score_mode,
+        test_hop(model, adj, hr2t, all_rel_ids, test_ds, device, score_mode,
                  max_k=args.max_k, n_queries=args.n_queries)
 
     if "inv" in tests:
