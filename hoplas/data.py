@@ -233,19 +233,45 @@ class KGTripleDataset(Dataset):
     identical IDs.
     """
 
+    @staticmethod
+    def _load_openke(local_dir, split):
+        """Load an OpenKE-format dataset (integer-ID triples) from local_dir. Files:
+        entity2id.txt / relation2id.txt (line 1 = count), and {train,valid,test}2id.txt
+        (line 1 = count, then `head tail rel` IDs). Returns (num_entities, num_relations,
+        base_triples) with base_triples columns reordered to (head, relation, tail)."""
+        def _count(fn):
+            with open(os.path.join(local_dir, fn)) as f:
+                return int(f.readline().split()[0])
+        ne, nr = _count("entity2id.txt"), _count("relation2id.txt")
+        fn = {"train": "train2id.txt", "valid": "valid2id.txt", "test": "test2id.txt"}[split]
+        arr = np.loadtxt(os.path.join(local_dir, fn), skiprows=1, dtype=np.int64)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        base = torch.from_numpy(arr[:, [0, 2, 1]]).long()  # OpenKE (h, t, r) -> (h, r, t)
+        return ne, nr, base
+
     def __init__(self, name="WN18RR", split="train", create_inverse=True, debug=True):
         super().__init__()
-        from pykeen.datasets import get_dataset  # data sourcing only
-        ds = get_dataset(dataset=name)
-        factory = {"train": ds.training, "valid": ds.validation, "test": ds.testing}[split]
         self.name, self.split, self.create_inverse = name, split, create_inverse
-        self.entity_to_id = ds.training.entity_to_id
-        self.relation_to_id = ds.training.relation_to_id
-        self.num_entities = ds.training.num_entities
-        self.num_base_relations = ds.training.num_relations
+        # Local OpenKE dataset (for datasets whose pykeen download is broken, e.g. WN18/FB15K).
+        data_root = os.path.expanduser(os.environ.get("HOPLAS_DATA", "~/github/hoplas/data"))
+        local_dir = os.path.join(data_root, name)
+        if os.path.isdir(local_dir) and os.path.exists(os.path.join(local_dir, "train2id.txt")):
+            self.num_entities, self.num_base_relations, base = self._load_openke(local_dir, split)
+            self.entity_to_id = self.relation_to_id = None  # ids already integer; unused downstream
+            self.source = f"openke:{local_dir}"
+        else:
+            from pykeen.datasets import get_dataset  # data sourcing only
+            ds = get_dataset(dataset=name)
+            factory = {"train": ds.training, "valid": ds.validation, "test": ds.testing}[split]
+            self.entity_to_id = ds.training.entity_to_id
+            self.relation_to_id = ds.training.relation_to_id
+            self.num_entities = ds.training.num_entities
+            self.num_base_relations = ds.training.num_relations
+            base = factory.mapped_triples.long()  # (T, 3) columns: head, relation, tail
+            self.source = "pykeen"
         self.num_relations = self.num_base_relations * (2 if create_inverse else 1)
 
-        base = factory.mapped_triples.long()  # (T, 3) columns: head, relation, tail
         if create_inverse:
             inv = base[:, [2, 1, 0]].clone()
             inv[:, 1] += self.num_base_relations
