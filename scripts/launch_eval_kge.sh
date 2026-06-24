@@ -36,7 +36,9 @@ echo "Running eval_kge.py on ${HOST}: checkpoints/${CKPT_NAME} $*"
 
 # Write a temp runner (variables expand locally into the script body;
 # no arg-passing across the SSH boundary, so quoting is unambiguous).
-cat > /tmp/hoplas_eval_run.sh << EOF
+# Unique per-invocation name ($$ = PID) so parallel evals don't clobber each other.
+RUNNER="/tmp/hoplas_eval_run_$$.sh"
+cat > "$RUNNER" << EOF
 #!/bin/bash
 case "${REPO_ARG}" in /*) REPO="${REPO_ARG}";; *) REPO="\$HOME/${REPO_ARG}";; esac
 case "${ENV_ARG}" in /*) ENV="${ENV_ARG}";; *) ENV="\$HOME/${ENV_ARG}";; esac
@@ -45,5 +47,6 @@ cd "\$REPO"
 python eval_kge.py "checkpoints/${CKPT_NAME}" $*
 EOF
 
-scp -q /tmp/hoplas_eval_run.sh "${HOST}:/tmp/hoplas_eval_run.sh"
-$SSH "${HOST}" "bash /tmp/hoplas_eval_run.sh"
+scp -q "$RUNNER" "${HOST}:${RUNNER}"
+$SSH "${HOST}" "bash ${RUNNER}; rm -f ${RUNNER}"
+rm -f "$RUNNER"

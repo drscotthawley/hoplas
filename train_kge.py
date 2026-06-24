@@ -283,9 +283,10 @@ def train(args):
                     "algebra": algebra_tensors(model),  # (Nr, n, n, n) learned algebras, or None
                     "ops": model.ops.state_dict()}, ckpt_path.replace(".pt", f"_{tag}.pt"))
 
+    R = train_ds.num_base_relations  # inverse of relation r is r+R (r<R) or r-R (r>=R)
     best_mrr = 0.0
     for epoch in range(1, args.epochs + 1):
-        tot = dict(loss=0.0, sim=0.0, sigreg=0.0, mom=0.0, neg=0.0)
+        tot = dict(loss=0.0, sim=0.0, sigreg=0.0, mom=0.0, neg=0.0, inv=0.0)
         n = 0
         for chunk in loader:
             chunk = chunk.to(device)
@@ -306,20 +307,33 @@ def train(args):
                 neg = F.cross_entropy(logits, torch.arange(h.size(0), device=device))
             else:
                 neg = pred.new_zeros(())
+            # Optional explicit inverse-consistency term: the inverse relation's operator should
+            # undo this relation's, i.e. op_{r_inv}(op_r(E[h])) ~ E[h]. The inverse relation
+            # already trains independently on inverse triples; this ties the two ops as a true
+            # round-trip identity (off by default).
+            if args.lambda_inv > 0:
+                r_inv = torch.where(r < R, r + R, r - R)
+                back = model.apply_relation(pred, r_inv)
+                inv = F.mse_loss(back, model.entity_emb(h))
+            else:
+                inv = pred.new_zeros(())
             loss = (1 - args.lambd) * (args.lambda_sim * sim + args.lambda_mom * mom
-                                       + args.lambda_neg * neg) + args.lambd * sigreg
+                                       + args.lambda_neg * neg + args.lambda_inv * inv) + args.lambd * sigreg
             opt.zero_grad(); loss.backward(); opt.step()
             if sched_per_batch:
                 sched.step()
             bs = h.size(0); n += bs
             tot["loss"] += loss.item() * bs; tot["sim"] += sim.item() * bs
             tot["sigreg"] += sigreg.item() * bs; tot["mom"] += mom.item() * bs
-            tot["neg"] += neg.item() * bs
+            tot["neg"] += neg.item() * bs; tot["inv"] += inv.item() * bs
         if sched is not None and not sched_per_batch:
             sched.step()
         avg = {k: v / n for k, v in tot.items()}
         cur_lr = opt.param_groups[0]["lr"]
-        msg = f"epoch {epoch:4d}/{args.epochs}  loss={avg['loss']:.5f}  sim={avg['sim']:.5f}  sigreg={avg['sigreg']:.5f}  mom={avg['mom']:.5f}  lr={cur_lr:.2e}"
+        msg = f"epoch {epoch:4d}/{args.epochs}  loss={avg['loss']:.5f}  sim={avg['sim']:.5f}  sigreg={avg['sigreg']:.5f}  mom={avg['mom']:.5f}"
+        if args.lambda_inv > 0:
+            msg += f"  inv={avg['inv']:.5f}"
+        msg += f"  lr={cur_lr:.2e}"
 
         log = {"epoch": epoch, "lr": cur_lr, **{f"{k}_loss": v for k, v in avg.items()}}
         log.update(algebra_metrics(model))  # ||a - a_quat|| etc. (empty dict for non-ph/quat ops)
@@ -396,6 +410,8 @@ def main():
     p.add_argument("--lambda-neg", type=float, default=0.0,
                    help="in-batch cosine-InfoNCE contrastive weight (0 disables; ~0.01 balances MSE)")
     p.add_argument("--neg-temp", type=float, default=0.05, help="temperature for the contrastive term")
+    p.add_argument("--lambda-inv", type=float, default=0.0,
+                   help="explicit inverse-consistency weight: MSE(op_{r_inv}(op_r(E[h])), E[h]) (0 disables)")
     p.add_argument("--mom-diag", action="store_true")
     p.add_argument("--sigreg-n", type=int, default=4096, help="entities sampled per step for SIGReg")
     p.add_argument("--quat-init", action=argparse.BooleanOptionalAction, default=False,
