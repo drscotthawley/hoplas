@@ -133,9 +133,9 @@ def train(args):
         project = f"line-{line_kind}"
     else:
         wandb_name = ckpt_name = f"{args.dataset}_{op_part}"
-        # multi-head run = dihedral (ring T + reflect I); single head = plain ring
-        kind = "dihedral" if (args.op_list and len(args.op_list) > 1) else "ring"
-        project = f"{kind}-{args.dataset}"  # ring-mnist / dihedral-mnist (cifar likewise)
+        # multi-head run = dihedral (ring T + reflect I); single head = its own target
+        kind = "dihedral" if (args.op_list and len(args.op_list) > 1) else args.target
+        project = f"{kind}-{args.dataset}"  # ring-/reflect-/dihedral-mnist (cifar likewise)
     if not args.no_wandb:
         wandb.init(project=project, name=wandb_name, config=vars(args))
         # index every logged metric/media by epoch, so panel sliders (incl. images) read in epochs, not steps
