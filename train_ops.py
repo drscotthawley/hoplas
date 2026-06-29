@@ -318,11 +318,15 @@ def train(args):
                                 names=("y2proj", "xproj_t2"), scales=SECONDARY_SCALES,
                                 pca=pca, max_points=args.max_viz_points)
                 if vae is not None and args.inf_every > 0 and epoch % args.inf_every == 0:
-                    for m in (proj, trans_op, inv_proj): m.eval()
-                    imgs_in, imgs_recon, imgs_xform = make_viz_grids(vae, proj, trans_op, inv_proj, viz_imgs)
-                    for m in (proj, trans_op, inv_proj): m.train()
+                    viz_ops = [proj, trans_op, inv_proj] + [h["op"] for h in sec_heads]
+                    for m in viz_ops: m.eval()
+                    imgs_in, imgs_recon, imgs_xform, sec_imgs = make_viz_grids(
+                        vae, proj, trans_op, inv_proj, viz_imgs, sec_heads=sec_heads)
+                    for m in viz_ops: m.train()
                     def _wimg(t): return wandb.Image(make_grid(t, nrow=10).permute(1,2,0).numpy(), caption=f"epoch {epoch}")
                     log.update({f"{args.dataset}_input": _wimg(imgs_in), f"{args.dataset}_recon": _wimg(imgs_recon), f"{args.dataset}_transformed": _wimg(imgs_xform)})
+                    # each secondary head (e.g. ph_reflect) decoded to pixels: digit i -> (n-i) for a clean involution
+                    log.update({f"{args.dataset}_{name}": _wimg(grid) for name, grid in sec_imgs.items()})
                 wandb.log(log)
     except KeyboardInterrupt:
         print("\ninterrupted — finishing run")

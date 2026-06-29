@@ -84,15 +84,19 @@ def apply_operation(z_batch, proj, trans_op, inv_proj, repeat=1):
 
 
 @torch.no_grad()
-def make_viz_grids(vae, proj, trans_op, inv_proj, imgs, repeat=1):
+def make_viz_grids(vae, proj, trans_op, inv_proj, imgs, repeat=1, sec_heads=()):
     """Encode imgs, run recon and transform pipelines, decode both.
-    Returns (imgs_input, imgs_recon, imgs_transformed) as CPU tensors in [0,1].
-    repeat composes the op that many times (see apply_operation).
-    Caller is responsible for setting models to eval mode beforehand."""
+    Returns (imgs_input, imgs_recon, imgs_transformed, sec_imgs) as CPU tensors in
+    [0,1]; sec_imgs is a {head_name: decoded_grid} dict (empty if no sec_heads),
+    each the head's op applied once to the same imgs (e.g. the reflection grid).
+    repeat composes the primary op that many times (see apply_operation).
+    Caller is responsible for setting models (incl. sec-head ops) to eval mode."""
     mu, _ = vae.encoder(imgs)
     imgs_recon = vae.decoder(inv_proj(proj(mu))).clamp(0, 1).cpu()
     imgs_xform = vae.decoder(apply_operation(mu, proj, trans_op, inv_proj, repeat=repeat)).clamp(0, 1).cpu()
-    return imgs.cpu(), imgs_recon, imgs_xform
+    sec_imgs = {h["name"]: vae.decoder(apply_operation(mu, proj, h["op"], inv_proj, repeat=1)).clamp(0, 1).cpu()
+                for h in sec_heads}
+    return imgs.cpu(), imgs_recon, imgs_xform, sec_imgs
 
 
 @torch.no_grad()
@@ -120,7 +124,7 @@ def run_demo(ckpt_path, out_dir=".", n_per_class=10, device=None):
     vae = load_vae(dataset, device=str(device))
     imgs = make_class_ordered_images(dataset, n_per_class).to(device)
 
-    imgs_input, imgs_recon, imgs_xform = make_viz_grids(vae, proj, trans_op, inv_proj, imgs)
+    imgs_input, imgs_recon, imgs_xform, _ = make_viz_grids(vae, proj, trans_op, inv_proj, imgs)
 
     os.makedirs(out_dir, exist_ok=True)
     for tensor, fname in [(imgs_input, "mnist_input.png"), (imgs_recon, "mnist_recon.png"), (imgs_xform, "mnist_transformed.png")]:
