@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader
 
 from hoplas.data import KGTripleDataset
 from hoplas.ops import OpWrapper
-from hoplas.losses import SIGReg, MomMatchLoss
+from hoplas.losses import SIGReg, MomMatchLoss, InfoNCE
 from hoplas.viz import fit_pca, embedding_scatter3d
 
 
@@ -300,13 +300,7 @@ def train(args):
             # Optional in-batch contrastive term (cosine InfoNCE): each pred should match its
             # own tail over the other tails in the batch -- a light discriminative pressure on
             # top of MSE+SIGReg (negatives, off by default to preserve the SIGReg-only regime).
-            if args.lambda_neg > 0:
-                pn = F.normalize(pred, dim=-1)
-                tn = F.normalize(t_emb, dim=-1)
-                logits = (pn @ tn.t()) / args.neg_temp
-                neg = F.cross_entropy(logits, torch.arange(h.size(0), device=device))
-            else:
-                neg = pred.new_zeros(())
+            neg = InfoNCE(pred, t_emb, args.neg_temp) if args.lambda_neg > 0 else pred.new_zeros(())
             # Optional explicit inverse-consistency term: the inverse relation's operator should
             # undo this relation's, i.e. op_{r_inv}(op_r(E[h])) ~ E[h]. The inverse relation
             # already trains independently on inverse triples; this ties the two ops as a true
