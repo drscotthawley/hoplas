@@ -61,16 +61,18 @@ class LineDataset(Dataset):
 
 
 class EncodingsDataset(Dataset):
-    """Pairs of precomputed VAE encodings: (class i, class i+1), with wraparound.
+    """Pairs of precomputed VAE encodings, paired by `target` with wraparound:
+    'ring' -> (class i, class i+1); 'reflect' -> (class i, class -i mod n).
 
     Drop-in replacement for LineDataset: returns the same
     ({'data', 'label'}, {'data', 'label'}) pair, where the target is a *random*
-    encoding of the next class (so each step is "advance to the next cluster").
-    The .pt file is small enough to hold entirely in memory.
+    encoding of the paired class. The .pt file is small enough to hold in memory.
     """
-    def __init__(self, pt_path, split="train", debug=True):
+    def __init__(self, pt_path, split="train", debug=True, target="ring"):
         super().__init__()
         assert split in ("train", "test"), f"split must be 'train' or 'test', got {split}"
+        assert target in ("ring", "reflect"), f"target must be 'ring' or 'reflect', got {target}"
+        self.target = target
         pt_path = os.path.expanduser(pt_path)
         if not os.path.exists(pt_path):
             raise FileNotFoundError(f"{pt_path} not found — run the appropriate encode script first")
@@ -89,7 +91,8 @@ class EncodingsDataset(Dataset):
 
     def __getitem__(self, idx):
         i = int(self.labels[idx])
-        j = (i + 1) % self.n_classes              # next digit, wrap 9->0
+        # 'ring': next class i+1 (wrap 9->0); 'reflect': class inversion -i (fixes 0)
+        j = (-i) % self.n_classes if self.target == "reflect" else (i + 1) % self.n_classes
         pool = self.class_indices[j]
         tgt_idx = pool[torch.randint(len(pool), (1,)).item()]  # random sample of class j
         return ({'data': self.z[idx], 'label': i},

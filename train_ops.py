@@ -106,8 +106,8 @@ def train(args):
         val_dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, debug=False, len=5000, target=args.target)
     else:
         pt = _PT_PATHS[args.dataset]
-        dataset = EncodingsDataset(pt_path=pt, split="train")
-        val_dataset = EncodingsDataset(pt_path=pt, split="test", debug=False)
+        dataset = EncodingsDataset(pt_path=pt, split="train", target=args.target)
+        val_dataset = EncodingsDataset(pt_path=pt, split="test", debug=False, target=args.target)
         args.nd = dataset.nd
     if args.pnd is None:
         args.pnd = args.nd
