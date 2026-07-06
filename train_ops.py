@@ -131,7 +131,7 @@ def train(args):
     if args.op == "quat":
         freeze_quaternion(trans_op.op)
     # inverse projector: maps pnd back to nd (unit_norm=False: output isn't on the sphere)
-    inv_proj = Projector(nd=args.pnd, pnd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, unit_norm=False).to(device)
+    inv_proj = Projector(nd=args.pnd, pnd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=False).to(device)
 
     # Frozen-geometry mode: load proj/inv_proj weights and freeze them, so only the op trains against
     # the fixed embedding (pure supervised). recon becomes constant. Geometry args were inherited as
