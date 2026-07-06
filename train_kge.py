@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 from hoplas.data import KGTripleDataset
 from hoplas.ops import OpWrapper
 from hoplas.losses import SIGReg, MomMatchLoss, InfoNCE
+from hoplas.models import Projector
 from hoplas.viz import fit_pca, embedding_scatter3d
 
 
@@ -59,12 +60,23 @@ class KGEModel(nn.Module):
     """Learnable entity embeddings + one relation operator per relation id."""
 
     def __init__(self, num_entities, num_relations, nd, op, order,
-                 op_resid=True, rank=2, unit_norm=False, quat_init=False):
+                 op_resid=True, rank=2, unit_norm=False, quat_init=False,
+                 use_proj=False, pnd=None, proj_n_hid=None, proj_layers=3, proj_resid=False):
         super().__init__()
         self.entity_emb = nn.Embedding(num_entities, nd)
         nn.init.normal_(self.entity_emb.weight, std=1.0)  # ~N(0,1); SIGReg keeps Cov ~ I
+        # Optional projector + inverse projector around the relation op (a nonlinear "lift", as in
+        # train_ops): entity -> proj -> op -> inv_proj. The op then acts in the projected (pnd)
+        # space, but SIGReg + eval scoring stay in the ORIGINAL entity space (predict() maps back
+        # through the inverse projector), so ranking is unchanged.
+        self.use_proj = use_proj
+        pd = (pnd or nd) if use_proj else nd
+        if use_proj:
+            nh = proj_n_hid or nd
+            self.proj = Projector(nd, pd, n_hid=nh, n_layers=proj_layers, proj_resid=proj_resid, unit_norm=unit_norm)
+            self.inv_proj = Projector(pd, nd, n_hid=nh, n_layers=proj_layers, unit_norm=False)
         self.ops = nn.ModuleList([
-            OpWrapper(op, nd, order, op_resid, rank, unit_norm) for _ in range(num_relations)
+            OpWrapper(op, pd, order, op_resid, rank, unit_norm) for _ in range(num_relations)
         ])
         if op == "quat":
             for o in self.ops:
@@ -131,6 +143,19 @@ class KGEModel(nn.Module):
             return ref
         return self._apply_relation_loop(h_emb, r)
 
+    def project(self, e):
+        """Entity (nd) -> projected space: proj(e) (pnd) iff self.use_proj, else e unchanged."""
+        return self.proj(e) if self.use_proj else e
+
+    def inv_project(self, z):
+        """Projected space -> original entity space (nd): inv_proj iff self.use_proj, else unchanged."""
+        return self.inv_proj(z) if self.use_proj else z
+
+    def predict(self, h, r):
+        """Original-space relation prediction for scoring/eval: project E[h], transform, then map
+        back through the inverse projector, so ranking stays in the entity space either way."""
+        return self.inv_project(self.apply_relation(self.project(self.entity_emb(h)), r))
+
     def forward(self, h, r, t):
         return self.apply_relation(self.entity_emb(h), r), self.entity_emb(t)
 
@@ -153,7 +178,7 @@ def evaluate(model, eval_ds, hr2t, device, batch=512, score="l2"):
     for i in range(0, len(triples), batch):
         chunk = triples[i:i + batch].to(device)
         h, r, t = chunk[:, 0], chunk[:, 1], chunk[:, 2]
-        pred = model.apply_relation(model.entity_emb(h), r)         # (B, nd)
+        pred = model.predict(h, r)         # (B, nd)
         if score == "dot":
             scores = pred @ E.t()
         elif score == "cos":
@@ -211,7 +236,7 @@ def embedding_viz(model, ds, op, order, epoch, max_points=1500):
     idx = torch.randperm(len(ds.triples))[:n].to(model.entity_emb.weight.device)
     tr = ds.triples.to(idx.device)[idx]
     h, r, t = tr[:, 0], tr[:, 1], tr[:, 2]
-    pred = model.apply_relation(model.entity_emb(h), r)
+    pred = model.predict(h, r)
     t_emb = model.entity_emb(t)
     pca = fit_pca([t_emb, pred])
     return embedding_scatter3d(t_emb, pred, epoch, op, order, s0_labels=r, s1_labels=r,
@@ -233,19 +258,27 @@ def train(args):
 
     model = KGEModel(train_ds.num_entities, train_ds.num_relations, args.nd, args.op,
                      args.order, args.op_resid, args.rank, args.unit_norm,
-                     quat_init=args.quat_init).to(device)
+                     quat_init=args.quat_init, use_proj=args.projector, pnd=args.pnd,
+                     proj_n_hid=args.proj_n_hid, proj_layers=args.proj_layers,
+                     proj_resid=args.proj_resid).to(device)
     model.apply_mode = args.apply
     n_emb = model.entity_emb.weight.numel()
     n_op = sum(p.numel() for o in model.ops for p in o.parameters() if p.requires_grad)
+    proj_params = (list(model.proj.parameters()) + list(model.inv_proj.parameters())) if model.use_proj else []
+    n_proj = sum(p.numel() for p in proj_params)
     algebra = "frozen-quat" if args.op == "quat" else ("quat-init learnable" if args.quat_init else "random learnable")
-    print(f"trainable params: entities={n_emb}  relation_ops={n_op}  | algebra: {algebra}")
+    proj_str = f"  projector(pnd={args.pnd or args.nd})={n_proj}" if model.use_proj else ""
+    print(f"trainable params: entities={n_emb}  relation_ops={n_op}{proj_str}  | algebra: {algebra}")
 
     op_lr = args.op_lr if args.op_lr is not None else args.lr
-    opt = torch.optim.AdamW([
+    param_groups = [
         {"params": model.entity_emb.parameters(), "lr": args.lr, "weight_decay": 0.0},
         {"params": [p for o in model.ops for p in o.parameters()], "lr": op_lr,
          "weight_decay": args.weight_decay},
-    ])
+    ]
+    if model.use_proj:
+        param_groups.append({"params": proj_params, "lr": args.lr, "weight_decay": args.weight_decay})
+    opt = torch.optim.AdamW(param_groups)
     # LR schedule. onecycle steps per-batch (cosine up-then-down to/from --max-lr);
     # warmup is a per-epoch linear ramp. Both param groups follow the same schedule.
     if args.scheduler == "onecycle":
@@ -278,22 +311,32 @@ def train(args):
     ckpt_path = os.path.join("checkpoints", f"{run_name}.pt")
 
     def save_ckpt(epoch, metrics, tag="final"):
-        torch.save({"epoch": epoch, "tag": tag, "args": vars(args), "metrics": metrics,
-                    "entity_emb": model.entity_emb.weight.detach().cpu(),
-                    "algebra": algebra_tensors(model),  # (Nr, n, n, n) learned algebras, or None
-                    "ops": model.ops.state_dict()}, ckpt_path.replace(".pt", f"_{tag}.pt"))
+        blob = {"epoch": epoch, "tag": tag, "args": vars(args), "metrics": metrics,
+                "entity_emb": model.entity_emb.weight.detach().cpu(),
+                "algebra": algebra_tensors(model),  # (Nr, n, n, n) learned algebras, or None
+                "ops": model.ops.state_dict()}
+        if model.use_proj:
+            blob["proj"], blob["inv_proj"] = model.proj.state_dict(), model.inv_proj.state_dict()
+        torch.save(blob, ckpt_path.replace(".pt", f"_{tag}.pt"))
 
     R = train_ds.num_base_relations  # inverse of relation r is r+R (r<R) or r-R (r>=R)
     best_mrr = 0.0
     for epoch in range(1, args.epochs + 1):
-        tot = dict(loss=0.0, sim=0.0, sigreg=0.0, mom=0.0, neg=0.0, inv=0.0)
+        tot = dict(loss=0.0, sim=0.0, sigreg=0.0, mom=0.0, neg=0.0, inv=0.0, recon=0.0)
         n = 0
         for chunk in loader:
             chunk = chunk.to(device)
             h, r, t = chunk[:, 0], chunk[:, 1], chunk[:, 2]
-            pred, t_emb = model(h, r, t)
+            he, te = model.entity_emb(h), model.entity_emb(t)
+            hp, tp = model.project(he), model.project(te)     # projected space (iff --projector)
+            pred = model.apply_relation(hp, r)                # transform in the projected space
+            t_emb = tp
             sim = sim_fn(pred, t_emb)
-            # SIGReg on a random sample of the entity table (anti-collapse, replaces negatives)
+            # recon: the inverse projector must invert the projector so predict() lands back in the
+            # original entity space (round-trip identity on both endpoints; only with --projector).
+            recon = (0.5 * (sim_fn(model.inv_project(hp), he) + sim_fn(model.inv_project(tp), te))
+                     if model.use_proj else pred.new_zeros(()))
+            # SIGReg on a random sample of the (original) entity table (anti-collapse; eval scores here)
             idx = torch.randint(0, model.entity_emb.num_embeddings, (args.sigreg_n,), device=device)
             sigreg = SIGReg(model.entity_emb(idx), global_step=epoch)
             mom = MomMatchLoss(pred, t_emb, labels=r, diag=args.mom_diag) if args.lambda_mom > 0 else pred.new_zeros(())
@@ -308,11 +351,12 @@ def train(args):
             if args.lambda_inv > 0:
                 r_inv = torch.where(r < R, r + R, r - R)
                 back = model.apply_relation(pred, r_inv)
-                inv = F.mse_loss(back, model.entity_emb(h))
+                inv = F.mse_loss(back, hp)   # round-trip in the projected space (hp == he without a projector)
             else:
                 inv = pred.new_zeros(())
             loss = (1 - args.lambd) * (args.lambda_sim * sim + args.lambda_mom * mom
-                                       + args.lambda_neg * neg + args.lambda_inv * inv) + args.lambd * sigreg
+                                       + args.lambda_neg * neg + args.lambda_inv * inv) \
+                   + args.lambd * sigreg + args.lambda_recon * recon
             opt.zero_grad(); loss.backward(); opt.step()
             if sched_per_batch:
                 sched.step()
@@ -320,6 +364,7 @@ def train(args):
             tot["loss"] += loss.item() * bs; tot["sim"] += sim.item() * bs
             tot["sigreg"] += sigreg.item() * bs; tot["mom"] += mom.item() * bs
             tot["neg"] += neg.item() * bs; tot["inv"] += inv.item() * bs
+            tot["recon"] += recon.item() * bs
         if sched is not None and not sched_per_batch:
             sched.step()
         avg = {k: v / n for k, v in tot.items()}
@@ -388,6 +433,19 @@ def main():
     p.add_argument("--unit-norm", action=argparse.BooleanOptionalAction, default=False,
                    help="L2-normalize op output (off for KGE: SIGReg wants Gaussian, not sphere)")
     p.add_argument("--rank", type=int, default=2, help="rotation-plane rank for filmr_expm")
+    # --- optional projector + inverse projector around the relation op (as in train_ops) ---
+    p.add_argument("--projector", action=argparse.BooleanOptionalAction, default=False,
+                   help="wrap the relation op in a projector + inverse projector (a nonlinear 'lift': "
+                        "entity -> projector -> op -> inverse projector). Scoring stays in the "
+                        "ORIGINAL entity space (prediction mapped back via the inverse projector). "
+                        "Off (default) = the original single-hypercomplex-layer KGE.")
+    p.add_argument("--pnd", type=int, default=None,
+                   help="projected operating dim (default: nd; must be divisible by --order)")
+    p.add_argument("--proj-n-hid", type=int, default=None, help="projector hidden width (default: nd)")
+    p.add_argument("--proj-layers", type=int, default=3, help="projector layers (>=2)")
+    p.add_argument("--proj-resid", action=argparse.BooleanOptionalAction, default=True,
+                   help="global skip in the projector, learn a perturbation of identity (default on; "
+                        "auto-disabled if pnd != nd). Since pnd defaults to nd, the residual is on.")
     p.add_argument("--score", choices=["l2", "dot", "cos"], default="l2",
                    help="ranking score for val/checkpoint-selection (final test reports all three)")
     p.add_argument("--apply", choices=["loop", "vec", "check"], default="loop",
@@ -398,6 +456,8 @@ def main():
     p.add_argument("--weight-decay", type=float, default=0.0, help="weight decay on relation ops")
     p.add_argument("--lambd", type=float, default=0.05, help="SIGReg weight: (1-lambd)*sim + lambd*sigreg")
     p.add_argument("--lambda-sim", type=float, default=1.0)
+    p.add_argument("--lambda-recon", type=float, default=1.0,
+                   help="inverse-projector round-trip reconstruction weight (only used with --projector)")
     p.add_argument("--sim", choices=["mse", "cos"], default="mse",
                    help="attraction loss: mse (L2) or cos (1 - cosine_similarity); pair cos with --score cos")
     p.add_argument("--lambda-mom", type=float, default=0.0, help="MomMatch weight (0 disables)")
@@ -428,7 +488,8 @@ def main():
                    help="wandb project name (default: hoplas-kge-<dataset>, keeps datasets separate)")
     args = p.parse_args()
     if args.op not in ("trans",):  # trans has no order requirement
-        assert args.nd % args.order == 0, f"nd={args.nd} must be divisible by order={args.order}"
+        pd = (args.pnd or args.nd) if args.projector else args.nd
+        assert pd % args.order == 0, f"operating dim {pd} (pnd/nd) must be divisible by order={args.order}"
     print("Arguments:", vars(args))
     train(args)
 
