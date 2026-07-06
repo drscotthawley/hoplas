@@ -75,7 +75,14 @@ class KGEModel(nn.Module):
         if use_proj:
             nh = proj_n_hid or nd
             self.proj = Projector(nd, pd, n_hid=nh, n_layers=proj_layers, proj_resid=proj_resid, unit_norm=unit_norm)
-            self.inv_proj = Projector(pd, nd, n_hid=nh, n_layers=proj_layers, unit_norm=False)
+            self.inv_proj = Projector(pd, nd, n_hid=nh, n_layers=proj_layers, proj_resid=proj_resid, unit_norm=False)
+            # Near-identity init: shrink each projector's output layer so that, with the residual
+            # skip (valid when pnd == nd), proj ~= inv_proj ~= identity at the start. Paired with
+            # --proj-freeze-epochs this lets the plain KGE train first, then the projectors unfreeze
+            # and depart from identity (instead of a random projector wrecking early training).
+            for pr in (self.proj, self.inv_proj):
+                nn.init.normal_(pr.out_proj.weight, std=1e-4)
+                nn.init.zeros_(pr.out_proj.bias)
         self.ops = nn.ModuleList([
             OpWrapper(op, pd, order, op_resid, rank, unit_norm) for _ in range(num_relations)
         ])
@@ -270,6 +277,10 @@ def train(args):
     algebra = "frozen-quat" if args.op == "quat" else ("quat-init learnable" if args.quat_init else "random learnable")
     proj_str = f"  projector(pnd={args.pnd or args.nd})={n_proj}" if model.use_proj else ""
     print(f"trainable params: entities={n_emb}  relation_ops={n_op}{proj_str}  | algebra: {algebra}")
+    if model.use_proj and args.proj_freeze_epochs > 0:
+        for p in proj_params:
+            p.requires_grad_(False)          # start frozen at near-identity; unfrozen at epoch F+1
+        print(f"projector frozen at near-identity for the first {args.proj_freeze_epochs} epochs")
 
     op_lr = args.op_lr if args.op_lr is not None else args.lr
     param_groups = [
@@ -329,6 +340,10 @@ def train(args):
     best_mrr = 0.0
     sim_ema = None  # smoothed train sim for the wpr plateau scheduler
     for epoch in range(1, args.epochs + 1):
+        if model.use_proj and args.proj_freeze_epochs > 0 and epoch == args.proj_freeze_epochs + 1:
+            for p in proj_params:
+                p.requires_grad_(True)       # unfreeze the projector to let it depart from identity
+            print(f"projector unfrozen at epoch {epoch}", flush=True)
         tot = dict(loss=0.0, sim=0.0, sigreg=0.0, mom=0.0, neg=0.0, inv=0.0, recon=0.0)
         n = 0
         for chunk in loader:
@@ -457,6 +472,9 @@ def main():
     p.add_argument("--proj-resid", action=argparse.BooleanOptionalAction, default=True,
                    help="global skip in the projector, learn a perturbation of identity (default on; "
                         "auto-disabled if pnd != nd). Since pnd defaults to nd, the residual is on.")
+    p.add_argument("--proj-freeze-epochs", type=int, default=0,
+                   help="freeze the near-identity-init projector + inverse projector for this many "
+                        "epochs (train the plain KGE first), then unfreeze. 0 = never freeze.")
     p.add_argument("--score", choices=["l2", "dot", "cos"], default="l2",
                    help="ranking score for val/checkpoint-selection (final test reports all three)")
     p.add_argument("--apply", choices=["loop", "vec", "check"], default="loop",
