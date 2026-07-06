@@ -336,9 +336,12 @@ def train(args):
             # original entity space (round-trip identity on both endpoints; only with --projector).
             recon = (0.5 * (sim_fn(model.inv_project(hp), he) + sim_fn(model.inv_project(tp), te))
                      if model.use_proj else pred.new_zeros(()))
-            # SIGReg on a random sample of the (original) entity table (anti-collapse; eval scores here)
+            # SIGReg anti-collapse on the space the op actually operates in: the *projected* cloud
+            # when --projector is on (mirrors train_ops, where SIGReg sits on the projected clouds),
+            # else the raw entity table. project() is identity without a projector, so this is
+            # byte-for-byte unchanged for the original single-layer KGE.
             idx = torch.randint(0, model.entity_emb.num_embeddings, (args.sigreg_n,), device=device)
-            sigreg = SIGReg(model.entity_emb(idx), global_step=epoch)
+            sigreg = SIGReg(model.project(model.entity_emb(idx)), global_step=epoch)
             mom = MomMatchLoss(pred, t_emb, labels=r, diag=args.mom_diag) if args.lambda_mom > 0 else pred.new_zeros(())
             # Optional in-batch contrastive term (cosine InfoNCE): each pred should match its
             # own tail over the other tails in the batch -- a light discriminative pressure on
