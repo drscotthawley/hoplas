@@ -19,6 +19,7 @@ from hoplas.inference import make_class_ordered_images, make_viz_grids
 from hoplas.models import Projector
 from hoplas.ops import OpWrapper
 from hoplas.losses import SIGReg, MomMatchLoss, InfoNCE
+from hoplas.schedulers import WarmupThenPlateauWithReduction
 
 
 def freeze_quaternion(ph_layer):
@@ -34,24 +35,6 @@ def freeze_quaternion(ph_layer):
     ph_layer.a.requires_grad_(False)
 from hoplas.vae import load_vae
 from hoplas.viz import embedding_scatter3d, fit_pca, SECONDARY_SCALES
-
-
-class WarmupThenPlateauWithReduction:
-    """Linear LR warmup for the first `boundary` epochs, then ReduceLROnPlateau.
-
-    SequentialLR can't hold ReduceLROnPlateau (it's metric-driven, not an LRScheduler),
-    so this thin router does the phase switch instead. Call once per epoch:
-        scheduler.step(metric, epoch)
-    The warmup scheduler ignores `metric`; the plateau scheduler ignores `epoch`.
-    """
-    def __init__(self, warmup, plateau, boundary):
-        self.warmup, self.plateau, self.boundary = warmup, plateau, boundary
-
-    def step(self, metric, epoch):
-        if self.warmup is not None and epoch <= self.boundary:
-            self.warmup.step()
-        else:
-            self.plateau.step(metric)
 
 
 @torch.no_grad()

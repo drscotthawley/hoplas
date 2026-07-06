@@ -30,6 +30,7 @@ from hoplas.ops import OpWrapper
 from hoplas.losses import SIGReg, MomMatchLoss, InfoNCE
 from hoplas.models import Projector
 from hoplas.viz import fit_pca, embedding_scatter3d
+from hoplas.schedulers import make_warmup_plateau
 
 
 def _hamilton_table(like):
@@ -281,10 +282,15 @@ def train(args):
     opt = torch.optim.AdamW(param_groups)
     # LR schedule. onecycle steps per-batch (cosine up-then-down to/from --max-lr);
     # warmup is a per-epoch linear ramp. Both param groups follow the same schedule.
+    sched_metric = False  # True iff scheduler.step() takes (metric, epoch) -- the wpr router
     if args.scheduler == "onecycle":
         sched = torch.optim.lr_scheduler.OneCycleLR(
             opt, max_lr=args.max_lr, epochs=args.epochs, steps_per_epoch=len(loader))
         sched_per_batch = True
+    elif args.scheduler == "wpr":  # linear-ramp warmup, then ReduceLROnPlateau (as in train_ops)
+        sched = make_warmup_plateau(opt, args.lr, args.warmup, args.warmup_start_lr, args.lr_patience)
+        sched_per_batch = False
+        sched_metric = True
     elif args.scheduler == "warmup" and args.warmup > 0:
         sched = torch.optim.lr_scheduler.LinearLR(
             opt, start_factor=max(args.warmup_start_lr / args.lr, 1e-6), total_iters=args.warmup)
@@ -321,6 +327,7 @@ def train(args):
 
     R = train_ds.num_base_relations  # inverse of relation r is r+R (r<R) or r-R (r>=R)
     best_mrr = 0.0
+    sim_ema = None  # smoothed train sim for the wpr plateau scheduler
     for epoch in range(1, args.epochs + 1):
         tot = dict(loss=0.0, sim=0.0, sigreg=0.0, mom=0.0, neg=0.0, inv=0.0, recon=0.0)
         n = 0
@@ -368,9 +375,10 @@ def train(args):
             tot["sigreg"] += sigreg.item() * bs; tot["mom"] += mom.item() * bs
             tot["neg"] += neg.item() * bs; tot["inv"] += inv.item() * bs
             tot["recon"] += recon.item() * bs
-        if sched is not None and not sched_per_batch:
-            sched.step()
         avg = {k: v / n for k, v in tot.items()}
+        sim_ema = avg["sim"] if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg["sim"]
+        if sched is not None and not sched_per_batch:
+            sched.step(sim_ema, epoch) if sched_metric else sched.step()
         cur_lr = opt.param_groups[0]["lr"]
         msg = f"epoch {epoch:4d}/{args.epochs}  loss={avg['loss']:.5f}  sim={avg['sim']:.5f}  sigreg={avg['sigreg']:.5f}  mom={avg['mom']:.5f}"
         if args.lambda_inv > 0:
@@ -477,9 +485,12 @@ def main():
     p.add_argument("--viz-every", type=int, default=0,
                    help="log a 3D-PCA embedding scatter (tail vs op(head)) to wandb every N epochs (0 disables)")
     p.add_argument("--max-viz-points", type=int, default=1500, help="points in the embedding scatter")
-    p.add_argument("--scheduler", choices=["none", "warmup", "onecycle"], default="warmup",
-                   help="LR schedule: warmup=linear ramp (per-epoch); onecycle=OneCycleLR (per-batch)")
+    p.add_argument("--scheduler", choices=["none", "warmup", "onecycle", "wpr"], default="warmup",
+                   help="LR schedule: warmup=linear ramp (per-epoch); onecycle=OneCycleLR (per-batch); "
+                        "wpr=linear-ramp warmup then ReduceLROnPlateau on smoothed sim (as in train_ops)")
     p.add_argument("--max-lr", type=float, default=0.1, help="peak LR for --scheduler onecycle")
+    p.add_argument("--lr-patience", type=int, default=50, help="ReduceLROnPlateau patience in epochs (wpr)")
+    p.add_argument("--sim-ema", type=float, default=0.8, help="EMA decay for smoothing sim before the wpr plateau step")
     p.add_argument("--warmup", type=int, default=0, help="linear LR-ramp epochs (0 disables)")
     p.add_argument("--warmup-start-lr", type=float, default=1e-4, help="LR at epoch 1 of the ramp")
     p.add_argument("--num-workers", type=int, default=0)
