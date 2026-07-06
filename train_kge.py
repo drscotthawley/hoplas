@@ -283,13 +283,14 @@ def train(args):
         print(f"projector frozen at near-identity for the first {args.proj_freeze_epochs} epochs")
 
     op_lr = args.op_lr if args.op_lr is not None else args.lr
+    proj_lr = args.proj_lr if args.proj_lr is not None else args.lr  # projector its own (usually smaller) LR
     param_groups = [
         {"params": model.entity_emb.parameters(), "lr": args.lr, "weight_decay": 0.0},
         {"params": [p for o in model.ops for p in o.parameters()], "lr": op_lr,
          "weight_decay": args.weight_decay},
     ]
     if model.use_proj:
-        param_groups.append({"params": proj_params, "lr": args.lr, "weight_decay": args.weight_decay})
+        param_groups.append({"params": proj_params, "lr": proj_lr, "weight_decay": args.weight_decay})
     opt = torch.optim.AdamW(param_groups)
     # LR schedule. onecycle steps per-batch (cosine up-then-down to/from --max-lr);
     # warmup is a per-epoch linear ramp. Both param groups follow the same schedule.
@@ -482,6 +483,8 @@ def main():
                         "check (run both and assert they match)")
     p.add_argument("--lr", type=float, default=0.01, help="entity-embedding LR")
     p.add_argument("--op-lr", type=float, default=None, help="relation-op LR (default: --lr)")
+    p.add_argument("--proj-lr", type=float, default=None,
+                   help="projector + inverse-projector LR (default: --lr); set smaller for stability")
     p.add_argument("--weight-decay", type=float, default=0.0, help="weight decay on relation ops")
     p.add_argument("--lambd", type=float, default=0.05, help="SIGReg weight: (1-lambd)*sim + lambd*sigreg")
     p.add_argument("--lambda-sim", type=float, default=1.0)
