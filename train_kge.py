@@ -270,6 +270,13 @@ def train(args):
                      proj_n_hid=args.proj_n_hid, proj_layers=args.proj_layers,
                      proj_resid=args.proj_resid).to(device)
     model.apply_mode = args.apply
+    if args.freeze_entity_from:
+        ck = torch.load(os.path.expanduser(args.freeze_entity_from), map_location=device)
+        with torch.no_grad():
+            model.entity_emb.weight.copy_(ck["entity_emb"].to(device))
+        model.entity_emb.weight.requires_grad_(False)   # frozen "data"; op+projector learn on it
+        print(f"loaded + froze entity_emb from {args.freeze_entity_from} "
+              f"(shape {tuple(model.entity_emb.weight.shape)})")
     n_emb = model.entity_emb.weight.numel()
     n_op = sum(p.numel() for o in model.ops for p in o.parameters() if p.requires_grad)
     proj_params = (list(model.proj.parameters()) + list(model.inv_proj.parameters())) if model.use_proj else []
@@ -285,10 +292,11 @@ def train(args):
     op_lr = args.op_lr if args.op_lr is not None else args.lr
     proj_lr = args.proj_lr if args.proj_lr is not None else args.lr  # projector its own (usually smaller) LR
     param_groups = [
-        {"params": model.entity_emb.parameters(), "lr": args.lr, "weight_decay": 0.0},
         {"params": [p for o in model.ops for p in o.parameters()], "lr": op_lr,
          "weight_decay": args.weight_decay},
     ]
+    if model.entity_emb.weight.requires_grad:   # skip when --freeze-entity-from (frozen data)
+        param_groups.append({"params": model.entity_emb.parameters(), "lr": args.lr, "weight_decay": 0.0})
     if model.use_proj:
         param_groups.append({"params": proj_params, "lr": proj_lr, "weight_decay": args.weight_decay})
     opt = torch.optim.AdamW(param_groups)
@@ -476,6 +484,10 @@ def main():
     p.add_argument("--proj-freeze-epochs", type=int, default=0,
                    help="freeze the near-identity-init projector + inverse projector for this many "
                         "epochs (train the plain KGE first), then unfreeze. 0 = never freeze.")
+    p.add_argument("--freeze-entity-from", type=str, default=None,
+                   help="load entity_emb from this checkpoint and FREEZE it (the frozen 'data'); "
+                        "train only the projector + relation ops on top (the OpLaS setup). SIGReg "
+                        "then shapes the projected space via the trainable projector.")
     p.add_argument("--score", choices=["l2", "dot", "cos"], default="l2",
                    help="ranking score for val/checkpoint-selection (final test reports all three)")
     p.add_argument("--apply", choices=["loop", "vec", "check"], default="loop",
