@@ -204,83 +204,6 @@ round-trip with no operator — a decoder-quality baseline), and
 advances each digit to the next one. The core logic is exposed as
 `run_demo(...)` / `apply_operation(...)` for reuse in notebooks or a Gradio app.
 
-### 4. Knowledge-graph embedding — `train_kge.py`
-
-Applies the same operator families to **link prediction** on standard
-knowledge-graph benchmarks (`WN18RR` by default; also `WN18`, `FB15k`,
-`FB15k237` via `--dataset`). Each entity gets a learned `nd`-d embedding and each
-relation *r* gets one of the operators above as a transform `op_r`; the model
-scores a triple `(h, r, t)` by how close `op_r(E[h])` lands to `E[t]`. The
-dataset adds an inverse relation for every relation (so `r`'s inverse is `r+R`),
-which the multi-hop and inverse evals below rely on.
-
-Training reuses the ring task's negative-free recipe and adds an optional light
-contrastive term:
-
-- a **similarity** loss pulls `op_r(E[h])` toward `E[t]` (`--sim {mse,cos}`),
-- **SIGReg** (`--lambd`) spreads the embedding distribution (anti-collapse),
-- an optional **in-batch cosine-InfoNCE** contrastive term (`--lambda-neg`,
-  `--neg-temp`) — the lever that sharpens Hits@1,
-- optional **MomMatch** (`--lambda-mom`) and explicit **inverse-consistency**
-  (`--lambda-inv`, an MSE that drives `op_{r⁻¹}(op_r(E[h])) → E[h]`).
-
-```bash
-# the WN18RR champion recipe (beats published QuatE on every metric)
-./train_kge.py --dataset WN18RR --op ph --order 2 --nd 512 \
-    --lambd 0.10 --lambda-neg 0.20 --neg-temp 0.05 \
-    --batch-size 8192 --score cos --epochs 300 --lr 0.01 --tag champ
-
-# via a config file (configs/kge_*.cfg; CLI overrides)
-./train_kge.py --config configs/kge_ph_neg20_bs8192.cfg
-```
-
-Evaluation is **filtered ranking** (all known-true tails removed before ranking);
-the final line reports `TEST[l2|dot|cos]` MRR / MR / Hits@{1,3,10} so you can
-compare score functions without retraining. Notable args: `--op` (any operator,
-plus `trans` for a TransE-style translation baseline), `--order` (hypercomplex
-order, `nd` must be divisible by it), `--score {l2,dot,cos}`, `--apply
-{loop,vec,check}` (`vec` is the vectorized relation-apply, ~8× faster and needed
-for many-relation graphs; `check` asserts it matches the loop), `--lambd`,
-`--lambda-neg`, `--neg-temp`, `--lambda-inv`, `--scheduler {none,warmup,onecycle}`,
-`--seed`, `--tag`. The best-validation checkpoint is saved to
-`checkpoints/<dataset>_<op>_<order>_nd<nd>_lambd<lambd>_<tag>_best.pt` (entity
-embeddings, all relation ops, and the CLI args). W&B project defaults to
-`hoplas-kge-<dataset>`.
-
-For unattended sweeps on a remote GPU box, `scripts/launch_queue.sh <host> --par
-N --gpu ID configs/kge_*.cfg` keeps *N* runs in flight; `scripts/results.sh` and
-`scripts/scores.sh` harvest the metric tables.
-
-### 5. Composability evaluation — `eval_kge.py`
-
-Offline (no training) probe of whether the *learned relation operators compose
-algebraically*. Loads a `train_kge.py` checkpoint, rebuilds the model, and runs
-four tests:
-
-- **`hop`** — multi-hop path queries (`op_{r_k}∘…∘op_{r_1}(E[h])` ranked against
-  true path endpoints) for `k = 1 … --max-k`; measures how composition degrades
-  with chain length.
-- **`inv`** — inverse round-trip: does `op_{r⁻¹}(op_r(E[h]))` recover `h`?
-- **`sym`** — involution on auto-detected symmetric relations: does `op_r²(E[h])`
-  return to `h`?
-- **`alg`** — operator-algebra structure: commutator norms and identity distance
-  on probe vectors.
-
-```bash
-# all four tests on a checkpoint
-python eval_kge.py checkpoints/WN18RR_ph_2_nd512_lambd0.1_champ_best.pt --score cos
-
-# just the path-query test, more hops
-python eval_kge.py checkpoints/<ckpt>.pt --tests hop --max-k 4 --n-queries 2000
-```
-
-Args: `--tests {all,hop,inv,sym,alg}` (comma-separated subset), `--max-k`,
-`--n-queries`, `--score {l2,dot,cos}` (defaults to the checkpoint's training
-score), `--device`. Test 0 is a 1-hop sanity check that must reproduce the
-training `TEST` MRR — if it doesn't, the path-query answer sets are leaking the
-training split. To run it on a remote host against a checkpoint there:
-`scripts/launch_eval_kge.sh <host> <checkpoint_filename> [extra eval args]`.
-
 ---
 
 ## Package layout
@@ -291,21 +214,15 @@ hoplas/
   ph_layers.py    PHMLinear (hypercomplex / parameterized Kronecker layer)
   ops.py          OpWrapper — builds an operator (optional residual + unit-norm)
   models.py       Projector (nd→nd MLP with optional residual + sphere norm)
-  data.py         LineDataset, MNISTEncodingsDataset, CIFAR-10 loaders, KGTripleDataset
+  data.py         LineDataset, MNISTEncodingsDataset, CIFAR-10 embedding loaders
   losses.py       SIGReg (Epps–Pulley normality regularizer)
   vae.py          loader for the pretrained MNIST VAE (third-party, auto-fetched)
   viz.py          3-D embedding scatter for W&B
   inference.py    checkpoint → MNIST grid transform demo
 train_simple_rot.py   supervised rotation benchmark
 train_ops.py         self-supervised ring task (main experiment)
-train_kge.py         knowledge-graph link prediction (WN18RR / WN18 / FB15k / FB15k-237)
-eval_kge.py          offline composability eval (multi-hop / inverse / involution / algebra)
 run_simple_rot.sh     sweep + results table for the benchmark
-configs/              config files for train runs (kge_*.cfg for the KGE experiments)
 scripts/encode_mnist.py   one-time MNIST→latent encoding
-scripts/launch_queue.sh   keep N training runs in flight on a remote host
-scripts/launch_eval_kge.sh  run eval_kge.py against a remote checkpoint
-scripts/results.sh, scores.sh   harvest metric tables from remote run logs
 tests/                pytest sanity checks
 ```
 

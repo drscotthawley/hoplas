@@ -1,24 +1,11 @@
 """Operator constructors for the ring task."""
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from hoplas.filmr import FiLMR, FiLMR_expm, MatOp, MatOp2
 from hoplas.ph_layers import PHMLinear
 from hoplas.kingdon_layers import KingdonQuaternion, KingdonDualQuaternion
-
-
-class Translation(nn.Module):
-    """TransE-style per-relation translation: op(x) = b (independent of x). With op_resid
-    (x + op(x)) this gives t ≈ h + b — a pure translation baseline for composability tests
-    (translations accumulate error across hops in a bounded space; rotations/PHM should not)."""
-    def __init__(self, nd: int):
-        super().__init__()
-        self.b = nn.Parameter(torch.randn(nd) * 0.1)
-
-    def forward(self, x):
-        return self.b.expand_as(x)
 
 
 class OpWrapper(nn.Module):
@@ -58,8 +45,6 @@ class OpWrapper(nn.Module):
             if nd % 8 != 0:
                 raise ValueError(f"nd={nd} must be divisible by 8 for KingdonDualQuaternion")
             self.op = KingdonDualQuaternion(in_features=nd, out_features=nd)
-        elif method == "trans":
-            self.op = Translation(nd)  # TransE-style x + b_r (composability control)
         else:
             raise ValueError(f"Unknown method: {method}")
 

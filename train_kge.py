@@ -21,16 +21,13 @@ import time
 import configargparse
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import wandb
 from torch.utils.data import DataLoader
 
 from hoplas.data import KGTripleDataset
 from hoplas.ops import OpWrapper
-from hoplas.losses import SIGReg, MomMatchLoss, InfoNCE
-from hoplas.models import Projector
+from hoplas.losses import SIGReg, MomMatchLoss
 from hoplas.viz import fit_pca, embedding_scatter3d
-from hoplas.schedulers import make_warmup_plateau
 
 
 def _hamilton_table(like):
@@ -61,30 +58,12 @@ class KGEModel(nn.Module):
     """Learnable entity embeddings + one relation operator per relation id."""
 
     def __init__(self, num_entities, num_relations, nd, op, order,
-                 op_resid=True, rank=2, unit_norm=False, quat_init=False,
-                 use_proj=False, pnd=None, proj_n_hid=None, proj_layers=3, proj_resid=False):
+                 op_resid=True, rank=2, unit_norm=False, quat_init=False):
         super().__init__()
         self.entity_emb = nn.Embedding(num_entities, nd)
         nn.init.normal_(self.entity_emb.weight, std=1.0)  # ~N(0,1); SIGReg keeps Cov ~ I
-        # Optional projector + inverse projector around the relation op (a nonlinear "lift", as in
-        # train_ops): entity -> proj -> op -> inv_proj. The op then acts in the projected (pnd)
-        # space, but SIGReg + eval scoring stay in the ORIGINAL entity space (predict() maps back
-        # through the inverse projector), so ranking is unchanged.
-        self.use_proj = use_proj
-        pd = (pnd or nd) if use_proj else nd
-        if use_proj:
-            nh = proj_n_hid or nd
-            self.proj = Projector(nd, pd, n_hid=nh, n_layers=proj_layers, proj_resid=proj_resid, unit_norm=unit_norm)
-            self.inv_proj = Projector(pd, nd, n_hid=nh, n_layers=proj_layers, proj_resid=proj_resid, unit_norm=False)
-            # Near-identity init: shrink each projector's output layer so that, with the residual
-            # skip (valid when pnd == nd), proj ~= inv_proj ~= identity at the start. Paired with
-            # --proj-freeze-epochs this lets the plain KGE train first, then the projectors unfreeze
-            # and depart from identity (instead of a random projector wrecking early training).
-            for pr in (self.proj, self.inv_proj):
-                nn.init.normal_(pr.out_proj.weight, std=1e-4)
-                nn.init.zeros_(pr.out_proj.bias)
         self.ops = nn.ModuleList([
-            OpWrapper(op, pd, order, op_resid, rank, unit_norm) for _ in range(num_relations)
+            OpWrapper(op, nd, order, op_resid, rank, unit_norm) for _ in range(num_relations)
         ])
         if op == "quat":
             for o in self.ops:
@@ -93,107 +72,32 @@ class KGEModel(nn.Module):
             for o in self.ops:
                 init_quaternion(o.op)            # learnable, warm-started at exact quaternion
 
-    def _apply_relation_loop(self, h_emb, r):
-        """Reference: loop over the (<=Nr) relations present, apply each op to its rows.
-        Correct for any op type, but O(#distinct relations) Python iterations per batch
-        — the bottleneck on many-relation datasets (FB15k-237: 474, FB15k: 2690)."""
+    def apply_relation(self, h_emb, r):
+        """Apply each sample's relation operator. r: (B,) relation ids."""
         out = h_emb.new_empty(h_emb.shape)
         for rid in r.unique().tolist():
             m = r == rid
             out[m] = self.ops[rid](h_emb[m])
         return out
 
-    def _phm_stack_ok(self):
-        """True iff every relation op is a PHMLinear (ph/quat): has a, s, bias, n."""
-        return all(hasattr(o.op, "a") and hasattr(o.op, "s") and hasattr(o.op, "bias")
-                   and hasattr(o.op, "n") for o in self.ops)
-
-    def _apply_relation_vec(self, h_emb, r, chunk=2048):
-        """Vectorized equivalent of the loop for PHMLinear ops, via the implicit-einsum
-        math (PHMLinear_Implicit: no per-relation weight materialization). Stacks the
-        per-relation algebra a (Nr,n,n,n), block weights s (Nr,n,do,di) and bias (Nr,nd),
-        then for each BATCH CHUNK gathers per-sample by relation id and contracts in a
-        memory-frugal order. Chunking + the explicit two-step contraction keep memory
-        bounded (the naive single fused einsum blew up to ~18GB at nd512/bs8192).
-        Handles op_resid / unit_norm uniformly from the (identical) OpWrappers."""
-        op0 = self.ops[0]
-        n = op0.op.n
-        A = torch.stack([o.op.a for o in self.ops])      # (Nr, n, n, n)  [i, a, b]
-        S = torch.stack([o.op.s for o in self.ops])      # (Nr, n, do, di) [i, j, k]
-        Bk = torch.stack([o.op.bias for o in self.ops])  # (Nr, nd)
-        B = h_emb.shape[0]
-        out = h_emb.new_empty(B, h_emb.shape[1])
-        for lo in range(0, B, chunk):
-            sl = slice(lo, lo + chunk)
-            hc, rc = h_emb[sl], r[sl]
-            a_r, s_r, b_r = A[rc], S[rc], Bk[rc]          # gather per sample (this chunk)
-            X = hc.reshape(hc.shape[0], n, -1)            # (p, b, k) = (p, n, di)
-            T = torch.einsum("pijk,pbk->pijb", s_r, X)    # contract k -> (p, i, j, b) small
-            Y = torch.einsum("piab,pijb->paj", a_r, T)    # contract i,b -> (p, a, j)=(p,n,do)
-            opx = Y.reshape(hc.shape[0], -1) + b_r        # == PHMLinear(hc), per row
-            oc = hc + opx if op0.op_resid else opx
-            out[sl] = F.normalize(oc, dim=-1) if op0.unit_norm else oc
-        return out
-
-    def apply_relation(self, h_emb, r):
-        """Apply each sample's relation operator. r: (B,) relation ids.
-        apply_mode (set by --apply): 'loop' (default), 'vec' (fast, PHM only), or
-        'check' (run both and assert they match — for verifying the vectorization)."""
-        mode = getattr(self, "apply_mode", "loop")
-        if mode in ("vec", "check") and self._phm_stack_ok():
-            vec = self._apply_relation_vec(h_emb, r)
-            if mode == "vec":
-                return vec
-            ref = self._apply_relation_loop(h_emb, r)
-            d = (ref - vec).abs().max().item()
-            print(f"[apply check] max|loop-vec|={d:.3e}", flush=True)
-            assert d < 1e-3, f"vectorized apply_relation mismatch: {d}"
-            return ref
-        return self._apply_relation_loop(h_emb, r)
-
-    def project(self, e):
-        """Entity (nd) -> projected space: proj(e) (pnd) iff self.use_proj, else e unchanged."""
-        return self.proj(e) if self.use_proj else e
-
-    def inv_project(self, z):
-        """Projected space -> original entity space (nd): inv_proj iff self.use_proj, else unchanged."""
-        return self.inv_proj(z) if self.use_proj else z
-
-    def predict(self, h, r):
-        """Original-space relation prediction for scoring/eval: project E[h], transform, then map
-        back through the inverse projector, so ranking stays in the entity space either way."""
-        return self.inv_project(self.apply_relation(self.project(self.entity_emb(h)), r))
-
     def forward(self, h, r, t):
         return self.apply_relation(self.entity_emb(h), r), self.entity_emb(t)
 
 
 @torch.no_grad()
-def evaluate(model, eval_ds, hr2t, device, batch=512, score="l2"):
-    """Filtered MRR / Hits@k over eval_ds (which includes inverse triples).
-
-    score: ranking function over candidate tails.
-      l2  -> -||pred - E||^2 (default; the original distance score)
-      dot -> pred . E         (bilinear; drops the spurious -||E||^2 per-entity term)
-      cos -> cosine(pred, E)  (dot, with pred and E row-normalized)
-    """
+def evaluate(model, eval_ds, hr2t, device, batch=512):
+    """Filtered MRR / Hits@k over eval_ds (which includes inverse triples)."""
     model.eval()
     E = model.entity_emb.weight                      # (Ne, nd)
     E_sq = (E ** 2).sum(-1)                           # (Ne,)
-    E_norm = E / (E.norm(dim=-1, keepdim=True) + 1e-9)
     triples = eval_ds.triples
     ranks = []
     for i in range(0, len(triples), batch):
         chunk = triples[i:i + batch].to(device)
         h, r, t = chunk[:, 0], chunk[:, 1], chunk[:, 2]
-        pred = model.predict(h, r)         # (B, nd)
-        if score == "dot":
-            scores = pred @ E.t()
-        elif score == "cos":
-            pred_n = pred / (pred.norm(dim=-1, keepdim=True) + 1e-9)
-            scores = pred_n @ E_norm.t()
-        else:  # "l2": -||pred - E||^2 via the matmul expansion (no (B,Ne,nd) tensor)
-            scores = -((pred ** 2).sum(-1, keepdim=True) - 2 * pred @ E.t() + E_sq.unsqueeze(0))
+        pred = model.apply_relation(model.entity_emb(h), r)         # (B, nd)
+        # score = -||pred - E||^2 (higher = closer), via the matmul expansion (no (B,Ne,nd) tensor)
+        scores = -((pred ** 2).sum(-1, keepdim=True) - 2 * pred @ E.t() + E_sq.unsqueeze(0))
         for b in range(chunk.size(0)):
             tgt = t[b].item()
             others = [x for x in hr2t[(h[b].item(), r[b].item())] if x != tgt]
@@ -244,7 +148,7 @@ def embedding_viz(model, ds, op, order, epoch, max_points=1500):
     idx = torch.randperm(len(ds.triples))[:n].to(model.entity_emb.weight.device)
     tr = ds.triples.to(idx.device)[idx]
     h, r, t = tr[:, 0], tr[:, 1], tr[:, 2]
-    pred = model.predict(h, r)
+    pred = model.apply_relation(model.entity_emb(h), r)
     t_emb = model.entity_emb(t)
     pca = fit_pca([t_emb, pred])
     return embedding_scatter3d(t_emb, pred, epoch, op, order, s0_labels=r, s1_labels=r,
@@ -266,155 +170,79 @@ def train(args):
 
     model = KGEModel(train_ds.num_entities, train_ds.num_relations, args.nd, args.op,
                      args.order, args.op_resid, args.rank, args.unit_norm,
-                     quat_init=args.quat_init, use_proj=args.projector, pnd=args.pnd,
-                     proj_n_hid=args.proj_n_hid, proj_layers=args.proj_layers,
-                     proj_resid=args.proj_resid).to(device)
-    model.apply_mode = args.apply
-    if args.freeze_entity_from:
-        ck = torch.load(os.path.expanduser(args.freeze_entity_from), map_location=device)
-        with torch.no_grad():
-            model.entity_emb.weight.copy_(ck["entity_emb"].to(device))
-        model.entity_emb.weight.requires_grad_(False)   # frozen "data"; op+projector learn on it
-        print(f"loaded + froze entity_emb from {args.freeze_entity_from} "
-              f"(shape {tuple(model.entity_emb.weight.shape)})")
+                     quat_init=args.quat_init).to(device)
     n_emb = model.entity_emb.weight.numel()
     n_op = sum(p.numel() for o in model.ops for p in o.parameters() if p.requires_grad)
-    proj_params = (list(model.proj.parameters()) + list(model.inv_proj.parameters())) if model.use_proj else []
-    n_proj = sum(p.numel() for p in proj_params)
     algebra = "frozen-quat" if args.op == "quat" else ("quat-init learnable" if args.quat_init else "random learnable")
-    proj_str = f"  projector(pnd={args.pnd or args.nd})={n_proj}" if model.use_proj else ""
-    print(f"trainable params: entities={n_emb}  relation_ops={n_op}{proj_str}  | algebra: {algebra}")
-    if model.use_proj and args.proj_freeze_epochs > 0:
-        for p in proj_params:
-            p.requires_grad_(False)          # start frozen at near-identity; unfrozen at epoch F+1
-        print(f"projector frozen at near-identity for the first {args.proj_freeze_epochs} epochs")
+    print(f"trainable params: entities={n_emb}  relation_ops={n_op}  | algebra: {algebra}")
 
     op_lr = args.op_lr if args.op_lr is not None else args.lr
-    proj_lr = args.proj_lr if args.proj_lr is not None else args.lr  # projector its own (usually smaller) LR
-    param_groups = [
+    opt = torch.optim.AdamW([
+        {"params": model.entity_emb.parameters(), "lr": args.lr, "weight_decay": 0.0},
         {"params": [p for o in model.ops for p in o.parameters()], "lr": op_lr,
          "weight_decay": args.weight_decay},
-    ]
-    if model.entity_emb.weight.requires_grad:   # skip when --freeze-entity-from (frozen data)
-        param_groups.append({"params": model.entity_emb.parameters(), "lr": args.lr, "weight_decay": 0.0})
-    if model.use_proj:
-        param_groups.append({"params": proj_params, "lr": proj_lr, "weight_decay": args.weight_decay})
-    opt = torch.optim.AdamW(param_groups)
+    ])
     # LR schedule. onecycle steps per-batch (cosine up-then-down to/from --max-lr);
     # warmup is a per-epoch linear ramp. Both param groups follow the same schedule.
-    sched_metric = False  # True iff scheduler.step() takes (metric, epoch) -- the wpr router
     if args.scheduler == "onecycle":
         sched = torch.optim.lr_scheduler.OneCycleLR(
             opt, max_lr=args.max_lr, epochs=args.epochs, steps_per_epoch=len(loader))
         sched_per_batch = True
-    elif args.scheduler == "wpr":  # linear-ramp warmup, then ReduceLROnPlateau (as in train_ops)
-        sched = make_warmup_plateau(opt, args.lr, args.warmup, args.warmup_start_lr, args.lr_patience)
-        sched_per_batch = False
-        sched_metric = True
     elif args.scheduler == "warmup" and args.warmup > 0:
         sched = torch.optim.lr_scheduler.LinearLR(
             opt, start_factor=max(args.warmup_start_lr / args.lr, 1e-6), total_iters=args.warmup)
         sched_per_batch = False
     else:
         sched, sched_per_batch = None, False
-    # Attraction loss: mse pulls pred onto t (L2 geometry); cos maximizes direction match
-    # (consistent with --score cos; may sharpen rank-1 vs. MSE).
-    if args.sim == "cos":
-        sim_fn = lambda p, q: (1.0 - torch.cosine_similarity(p, q, dim=-1)).mean()
-    else:
-        sim_fn = nn.MSELoss()
+    sim_fn = nn.MSELoss()
 
-    order_str = f"_{args.order}" if args.op not in ("trans",) else ""
-    run_name = f"{args.dataset}_{args.op}{order_str}_nd{args.nd}_lambd{args.lambd}"
+    run_name = f"{args.dataset}_{args.op}_{args.order}_nd{args.nd}_lambd{args.lambd}"
     if args.tag:
         run_name += f"_{args.tag}"
     if not args.no_wandb:
-        # Per-dataset project so e.g. FB15k runs don't mix with WN18RR (override with --wandb-project).
-        project = args.wandb_project or f"hoplas-kge-{args.dataset}"
-        wandb.init(project=project, name=run_name, config=vars(args))
+        wandb.init(project="hoplas-kge", name=run_name, config=vars(args))
         wandb.define_metric("epoch"); wandb.define_metric("*", step_metric="epoch")
     os.makedirs("checkpoints", exist_ok=True)
     ckpt_path = os.path.join("checkpoints", f"{run_name}.pt")
 
     def save_ckpt(epoch, metrics, tag="final"):
-        blob = {"epoch": epoch, "tag": tag, "args": vars(args), "metrics": metrics,
-                "entity_emb": model.entity_emb.weight.detach().cpu(),
-                "algebra": algebra_tensors(model),  # (Nr, n, n, n) learned algebras, or None
-                "ops": model.ops.state_dict()}
-        if model.use_proj:
-            blob["proj"], blob["inv_proj"] = model.proj.state_dict(), model.inv_proj.state_dict()
-        torch.save(blob, ckpt_path.replace(".pt", f"_{tag}.pt"))
+        torch.save({"epoch": epoch, "tag": tag, "args": vars(args), "metrics": metrics,
+                    "entity_emb": model.entity_emb.weight.detach().cpu(),
+                    "algebra": algebra_tensors(model),  # (Nr, n, n, n) learned algebras, or None
+                    "ops": model.ops.state_dict()}, ckpt_path.replace(".pt", f"_{tag}.pt"))
 
-    R = train_ds.num_base_relations  # inverse of relation r is r+R (r<R) or r-R (r>=R)
     best_mrr = 0.0
-    sim_ema = None  # smoothed train sim for the wpr plateau scheduler
     for epoch in range(1, args.epochs + 1):
-        if model.use_proj and args.proj_freeze_epochs > 0 and epoch == args.proj_freeze_epochs + 1:
-            for p in proj_params:
-                p.requires_grad_(True)       # unfreeze the projector to let it depart from identity
-            print(f"projector unfrozen at epoch {epoch}", flush=True)
-        tot = dict(loss=0.0, sim=0.0, sigreg=0.0, mom=0.0, neg=0.0, inv=0.0, recon=0.0)
+        tot = dict(loss=0.0, sim=0.0, sigreg=0.0, mom=0.0)
         n = 0
         for chunk in loader:
             chunk = chunk.to(device)
             h, r, t = chunk[:, 0], chunk[:, 1], chunk[:, 2]
-            he, te = model.entity_emb(h), model.entity_emb(t)
-            hp, tp = model.project(he), model.project(te)     # projected space (iff --projector)
-            pred = model.apply_relation(hp, r)                # transform in the projected space
-            t_emb = tp
+            pred, t_emb = model(h, r, t)
             sim = sim_fn(pred, t_emb)
-            # recon: the inverse projector must invert the projector so predict() lands back in the
-            # original entity space (round-trip identity on both endpoints; only with --projector).
-            recon = (0.5 * (sim_fn(model.inv_project(hp), he) + sim_fn(model.inv_project(tp), te))
-                     if model.use_proj else pred.new_zeros(()))
-            # SIGReg anti-collapse on the space the op actually operates in: the *projected* cloud
-            # when --projector is on (mirrors train_ops, where SIGReg sits on the projected clouds),
-            # else the raw entity table. project() is identity without a projector, so this is
-            # byte-for-byte unchanged for the original single-layer KGE.
+            # SIGReg on a random sample of the entity table (anti-collapse, replaces negatives)
             idx = torch.randint(0, model.entity_emb.num_embeddings, (args.sigreg_n,), device=device)
-            sigreg = SIGReg(model.project(model.entity_emb(idx)), global_step=epoch)
+            sigreg = SIGReg(model.entity_emb(idx), global_step=epoch)
             mom = MomMatchLoss(pred, t_emb, labels=r, diag=args.mom_diag) if args.lambda_mom > 0 else pred.new_zeros(())
-            # Optional in-batch contrastive term (cosine InfoNCE): each pred should match its
-            # own tail over the other tails in the batch -- a light discriminative pressure on
-            # top of MSE+SIGReg (negatives, off by default to preserve the SIGReg-only regime).
-            neg = InfoNCE(pred, t_emb, args.neg_temp) if args.lambda_neg > 0 else pred.new_zeros(())
-            # Optional explicit inverse-consistency term: the inverse relation's operator should
-            # undo this relation's, i.e. op_{r_inv}(op_r(E[h])) ~ E[h]. The inverse relation
-            # already trains independently on inverse triples; this ties the two ops as a true
-            # round-trip identity (off by default).
-            if args.lambda_inv > 0:
-                r_inv = torch.where(r < R, r + R, r - R)
-                back = model.apply_relation(pred, r_inv)
-                inv = F.mse_loss(back, hp)   # round-trip in the projected space (hp == he without a projector)
-            else:
-                inv = pred.new_zeros(())
-            loss = (1 - args.lambd) * (args.lambda_sim * sim + args.lambda_mom * mom
-                                       + args.lambda_neg * neg + args.lambda_inv * inv) \
-                   + args.lambd * sigreg + args.lambda_recon * recon
+            loss = (1 - args.lambd) * (args.lambda_sim * sim + args.lambda_mom * mom) + args.lambd * sigreg
             opt.zero_grad(); loss.backward(); opt.step()
             if sched_per_batch:
                 sched.step()
             bs = h.size(0); n += bs
             tot["loss"] += loss.item() * bs; tot["sim"] += sim.item() * bs
-            tot["sigreg"] += sigreg.item() * bs; tot["mom"] += mom.item() * bs
-            tot["neg"] += neg.item() * bs; tot["inv"] += inv.item() * bs
-            tot["recon"] += recon.item() * bs
-        avg = {k: v / n for k, v in tot.items()}
-        sim_ema = avg["sim"] if sim_ema is None else args.sim_ema * sim_ema + (1 - args.sim_ema) * avg["sim"]
+            tot["sigreg"] += sigreg.item() * bs; tot["mom"] += float(mom) * bs
         if sched is not None and not sched_per_batch:
-            sched.step(sim_ema, epoch) if sched_metric else sched.step()
+            sched.step()
+        avg = {k: v / n for k, v in tot.items()}
         cur_lr = opt.param_groups[0]["lr"]
-        msg = f"epoch {epoch:4d}/{args.epochs}  loss={avg['loss']:.5f}  sim={avg['sim']:.5f}  sigreg={avg['sigreg']:.5f}  mom={avg['mom']:.5f}"
-        if args.lambda_inv > 0:
-            msg += f"  inv={avg['inv']:.5f}"
-        msg += f"  lr={cur_lr:.2e}"
+        msg = f"epoch {epoch:4d}/{args.epochs}  loss={avg['loss']:.5f}  sim={avg['sim']:.5f}  sigreg={avg['sigreg']:.5f}  mom={avg['mom']:.5f}  lr={cur_lr:.2e}"
 
         log = {"epoch": epoch, "lr": cur_lr, **{f"{k}_loss": v for k, v in avg.items()}}
         log.update(algebra_metrics(model))  # ||a - a_quat|| etc. (empty dict for non-ph/quat ops)
         if "algebra_dist_quat" in log:
             msg += f"  algΔquat={log['algebra_dist_quat']:.3f}"
         if args.eval_every and (epoch % args.eval_every == 0 or epoch == 1):
-            m = evaluate(model, valid_ds, hr2t, device, score=args.score)
+            m = evaluate(model, valid_ds, hr2t, device)
             msg += f"  | val MRR={m['mrr']:.4f} H@10={m['h10']:.4f} H@1={m['h1']:.4f}"
             log.update({f"val_{k}": v for k, v in m.items()})
             if m["mrr"] > best_mrr:
@@ -427,28 +255,15 @@ def train(args):
         if not args.no_wandb:
             wandb.log(log)
 
-    # Report all three scoring functions at final test eval, so one run shows whether
-    # dot/cos (which drop the spurious -||E||^2 per-entity term) beat l2 on H@1/MRR.
-    test_scores = {sc: evaluate(model, test_ds, hr2t, device, score=sc)
-                   for sc in ["l2", "dot", "cos"]}
-    for sc in ["l2", "dot", "cos"]:
-        m = test_scores[sc]
-        print(f"TEST[{sc}]  MRR={m['mrr']:.4f}  MR={m['mr']:.1f}  "
-              f"H@1={m['h1']:.4f}  H@3={m['h3']:.4f}  H@10={m['h10']:.4f}", flush=True)
-    final = dict(test_scores[args.score])
+    final = evaluate(model, test_ds, hr2t, device)
     final.update(algebra_metrics(model))
-    # Plain TEST line kept for scripts/results.sh compatibility (reflects --score, default l2).
     print(f"\nTEST  MRR={final['mrr']:.4f}  MR={final['mr']:.1f}  "
           f"H@1={final['h1']:.4f}  H@3={final['h3']:.4f}  H@10={final['h10']:.4f}"
-          + (f"  algΔquat={final['algebra_dist_quat']:.3f}" if "algebra_dist_quat" in final else ""), flush=True)
+          + (f"  algΔquat={final['algebra_dist_quat']:.3f}" if "algebra_dist_quat" in final else ""))
     save_ckpt(args.epochs, final, tag="final")
     print(f"saved checkpoints: {ckpt_path.replace('.pt', '_best.pt')} , _final.pt")
     if not args.no_wandb:
-        log = {"epoch": args.epochs}
-        for sc, m in test_scores.items():
-            log.update({f"test_{sc}_{k}": v for k, v in m.items()})
-        log.update({f"test_{k}": v for k, v in final.items()})
-        wandb.log(log)
+        wandb.log({"epoch": args.epochs, **{f"test_{k}": v for k, v in final.items()}})
         wandb.finish()
     return final
 
@@ -461,55 +276,19 @@ def main():
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--nd", type=int, default=200, help="entity embedding dim (divisible by --order)")
     p.add_argument("--op", choices=["filmr", "filmr_expm", "matop", "matop_clip", "matop2",
-                                     "ph", "quat", "kquat", "kdualquat", "trans"], default="ph")
+                                     "ph", "quat", "kquat", "kdualquat"], default="ph")
     p.add_argument("--order", type=int, default=4, help="hypercomplex order n (nd divisible by order)")
     p.add_argument("--op-resid", action=argparse.BooleanOptionalAction, default=True,
                    help="relation as x + op(x) (centers at identity)")
     p.add_argument("--unit-norm", action=argparse.BooleanOptionalAction, default=False,
                    help="L2-normalize op output (off for KGE: SIGReg wants Gaussian, not sphere)")
     p.add_argument("--rank", type=int, default=2, help="rotation-plane rank for filmr_expm")
-    # --- optional projector + inverse projector around the relation op (as in train_ops) ---
-    p.add_argument("--projector", action=argparse.BooleanOptionalAction, default=False,
-                   help="wrap the relation op in a projector + inverse projector (a nonlinear 'lift': "
-                        "entity -> projector -> op -> inverse projector). Scoring stays in the "
-                        "ORIGINAL entity space (prediction mapped back via the inverse projector). "
-                        "Off (default) = the original single-hypercomplex-layer KGE.")
-    p.add_argument("--pnd", type=int, default=None,
-                   help="projected operating dim (default: nd; must be divisible by --order)")
-    p.add_argument("--proj-n-hid", type=int, default=None, help="projector hidden width (default: nd)")
-    p.add_argument("--proj-layers", type=int, default=3, help="projector layers (>=2)")
-    p.add_argument("--proj-resid", action=argparse.BooleanOptionalAction, default=True,
-                   help="global skip in the projector, learn a perturbation of identity (default on; "
-                        "auto-disabled if pnd != nd). Since pnd defaults to nd, the residual is on.")
-    p.add_argument("--proj-freeze-epochs", type=int, default=0,
-                   help="freeze the near-identity-init projector + inverse projector for this many "
-                        "epochs (train the plain KGE first), then unfreeze. 0 = never freeze.")
-    p.add_argument("--freeze-entity-from", type=str, default=None,
-                   help="load entity_emb from this checkpoint and FREEZE it (the frozen 'data'); "
-                        "train only the projector + relation ops on top (the OpLaS setup). SIGReg "
-                        "then shapes the projected space via the trainable projector.")
-    p.add_argument("--score", choices=["l2", "dot", "cos"], default="l2",
-                   help="ranking score for val/checkpoint-selection (final test reports all three)")
-    p.add_argument("--apply", choices=["loop", "vec", "check"], default="loop",
-                   help="relation-application path: loop (reference), vec (fast einsum, PHM ops only), "
-                        "check (run both and assert they match)")
     p.add_argument("--lr", type=float, default=0.01, help="entity-embedding LR")
     p.add_argument("--op-lr", type=float, default=None, help="relation-op LR (default: --lr)")
-    p.add_argument("--proj-lr", type=float, default=None,
-                   help="projector + inverse-projector LR (default: --lr); set smaller for stability")
     p.add_argument("--weight-decay", type=float, default=0.0, help="weight decay on relation ops")
     p.add_argument("--lambd", type=float, default=0.05, help="SIGReg weight: (1-lambd)*sim + lambd*sigreg")
     p.add_argument("--lambda-sim", type=float, default=1.0)
-    p.add_argument("--lambda-recon", type=float, default=1.0,
-                   help="inverse-projector round-trip reconstruction weight (only used with --projector)")
-    p.add_argument("--sim", choices=["mse", "cos"], default="mse",
-                   help="attraction loss: mse (L2) or cos (1 - cosine_similarity); pair cos with --score cos")
     p.add_argument("--lambda-mom", type=float, default=0.0, help="MomMatch weight (0 disables)")
-    p.add_argument("--lambda-neg", type=float, default=0.0,
-                   help="in-batch cosine-InfoNCE contrastive weight (0 disables; ~0.01 balances MSE)")
-    p.add_argument("--neg-temp", type=float, default=0.05, help="temperature for the contrastive term")
-    p.add_argument("--lambda-inv", type=float, default=0.0,
-                   help="explicit inverse-consistency weight: MSE(op_{r_inv}(op_r(E[h])), E[h]) (0 disables)")
     p.add_argument("--mom-diag", action="store_true")
     p.add_argument("--sigreg-n", type=int, default=4096, help="entities sampled per step for SIGReg")
     p.add_argument("--quat-init", action=argparse.BooleanOptionalAction, default=False,
@@ -518,12 +297,9 @@ def main():
     p.add_argument("--viz-every", type=int, default=0,
                    help="log a 3D-PCA embedding scatter (tail vs op(head)) to wandb every N epochs (0 disables)")
     p.add_argument("--max-viz-points", type=int, default=1500, help="points in the embedding scatter")
-    p.add_argument("--scheduler", choices=["none", "warmup", "onecycle", "wpr"], default="warmup",
-                   help="LR schedule: warmup=linear ramp (per-epoch); onecycle=OneCycleLR (per-batch); "
-                        "wpr=linear-ramp warmup then ReduceLROnPlateau on smoothed sim (as in train_ops)")
+    p.add_argument("--scheduler", choices=["none", "warmup", "onecycle"], default="warmup",
+                   help="LR schedule: warmup=linear ramp (per-epoch); onecycle=OneCycleLR (per-batch)")
     p.add_argument("--max-lr", type=float, default=0.1, help="peak LR for --scheduler onecycle")
-    p.add_argument("--lr-patience", type=int, default=50, help="ReduceLROnPlateau patience in epochs (wpr)")
-    p.add_argument("--sim-ema", type=float, default=0.8, help="EMA decay for smoothing sim before the wpr plateau step")
     p.add_argument("--warmup", type=int, default=0, help="linear LR-ramp epochs (0 disables)")
     p.add_argument("--warmup-start-lr", type=float, default=1e-4, help="LR at epoch 1 of the ramp")
     p.add_argument("--num-workers", type=int, default=0)
@@ -531,12 +307,8 @@ def main():
     p.add_argument("--tag", default="")
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--no-wandb", action="store_true")
-    p.add_argument("--wandb-project", default=None,
-                   help="wandb project name (default: hoplas-kge-<dataset>, keeps datasets separate)")
     args = p.parse_args()
-    if args.op not in ("trans",):  # trans has no order requirement
-        pd = (args.pnd or args.nd) if args.projector else args.nd
-        assert pd % args.order == 0, f"operating dim {pd} (pnd/nd) must be divisible by order={args.order}"
+    assert args.nd % args.order == 0, f"nd={args.nd} must be divisible by order={args.order}"
     print("Arguments:", vars(args))
     train(args)
 
