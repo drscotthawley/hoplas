@@ -18,11 +18,9 @@ import random
 from collections import defaultdict
 
 import torch
-import torch.nn.functional as F
 
 from hoplas.data import KGTripleDataset
-from hoplas.ops import OpWrapper
-from train_kge import KGEModel, evaluate
+from hoplas.kge import KGEModel, evaluate, score_matrix, mrr_hits
 
 
 # ---------------------------------------------------------------------------
@@ -78,44 +76,8 @@ def build_hr2t(datasets):
     return build_adj(datasets)  # same structure
 
 
-def score_matrix(model, pred, score_mode, device):
-    """Return (B, Ne) score matrix for `pred` against all entity embeddings."""
-    E = model.entity_emb.weight
-    if score_mode == "dot":
-        return pred @ E.t()
-    elif score_mode == "cos":
-        pred_n = F.normalize(pred, dim=-1)
-        E_n = F.normalize(E, dim=-1)
-        return pred_n @ E_n.t()
-    else:  # l2: -||pred - E||^2
-        E_sq = (E ** 2).sum(-1)
-        return -((pred ** 2).sum(-1, keepdim=True) - 2 * pred @ E.t() + E_sq.unsqueeze(0))
-
-
-def filtered_ranks(scores, targets, filter_sets, device):
-    """
-    scores: (B, Ne) float
-    targets: (B,) int — the true target entity for each row
-    filter_sets: list of B sets (each = known-true entities for that query)
-    Returns (B,) integer ranks (1-based, optimistic-free strict-greater).
-    """
-    ranks = []
-    for i in range(scores.size(0)):
-        tgt = targets[i].item()
-        s = scores[i].clone()
-        others = [x for x in filter_sets[i] if x != tgt]
-        if others:
-            s[torch.tensor(others, device=device)] = float("-inf")
-        ranks.append(1 + int((s > s[tgt]).sum().item()))
-    return ranks
-
-
-def mrr_hits(ranks):
-    t = torch.tensor(ranks, dtype=torch.float)
-    return dict(mrr=(1.0 / t).mean().item(), mr=t.mean().item(),
-                h1=(t <= 1).float().mean().item(),
-                h3=(t <= 3).float().mean().item(),
-                h10=(t <= 10).float().mean().item())
+# score_matrix / filtered_ranks / mrr_hits now live in hoplas/kge.py (imported above),
+# shared with train_kge.evaluate() so training and offline metrics are identical.
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +171,7 @@ def test_hop(model, adj, hr2t, all_rel_ids, test_ds, device, score_mode, max_k=3
             for hop_idx in range(rel_seq_len):
                 r_ids = torch.tensor([q[1][hop_idx] for q in chunk], dtype=torch.long, device=device)
                 pred = model.apply_relation(pred, r_ids)
-            scores = score_matrix(model, pred, score_mode, device)
+            scores = score_matrix(model, pred, score_mode)
             # Rank each target (k=1: held-out test tails; k>=2: path endpoints),
             # filtering the other known positives out (standard filtered setting).
             for b_idx, q in enumerate(chunk):
@@ -250,7 +212,7 @@ def test_inverse(model, test_ds, hr2t, device, score_mode, n_queries=2000):
         pred = model.apply_relation(model.entity_emb(h), r)
         r_inv = r + R
         pred2 = model.apply_relation(pred, r_inv)
-        scores = score_matrix(model, pred2, score_mode, device)
+        scores = score_matrix(model, pred2, score_mode)
         # rank h (the starting entity — should be recovered)
         for b in range(chunk.size(0)):
             h_tgt = h[b].item()
@@ -325,7 +287,7 @@ def test_involution(model, datasets, hr2t, device, score_mode, n_queries=2000):
         p2 = model.apply_relation(p1, r_ids)
         err = (p2 - e_h).norm(dim=-1) / (e_h.norm(dim=-1) + 1e-9)
         invol_errors.extend(err.tolist())
-        scores = score_matrix(model, p2, score_mode, device)
+        scores = score_matrix(model, p2, score_mode)
         for b in range(len(chunk)):
             h_tgt = h_ids[b].item()
             s = scores[b]
