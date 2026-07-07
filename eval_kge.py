@@ -26,29 +26,38 @@ from train_kge import KGEModel, evaluate
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint loading
+# Checkpoint loading (model reconstruction only) + datasets (loaded separately)
 # ---------------------------------------------------------------------------
 
 def load_checkpoint(path, device):
-    ck = torch.load(path, map_location=device)
-    saved_args = ck["args"]  # dict stored by train_kge.save_ckpt
-    a = argparse.Namespace(**saved_args)
-    # Rebuild datasets using the checkpoint's dataset name
-    train_ds = KGTripleDataset(a.dataset, "train", create_inverse=True)
-    valid_ds = KGTripleDataset(a.dataset, "valid", create_inverse=True)
-    test_ds  = KGTripleDataset(a.dataset, "test",  create_inverse=True)
-    # Build model skeleton and load weights
+    """Load a train_kge checkpoint dict (saved weights + args). Pure I/O -- no model,
+    no datasets."""
+    return torch.load(path, map_location=device)
+
+
+def build_model(ck, device):
+    """Reconstruct the KGEModel from a checkpoint and load its weights. Entity/relation
+    counts are inferred from the saved tensors (entity_emb rows; ops ModuleList indices),
+    so no dataset is needed here. Returns (model, args_namespace)."""
+    a = argparse.Namespace(**ck["args"])  # dict stored by train_kge.save_ckpt
+    num_entities = ck["entity_emb"].shape[0]
+    num_relations = len({k.split(".")[0] for k in ck["ops"]})  # keys are "<rel_id>.op.*"
     model = KGEModel(
-        train_ds.num_entities, train_ds.num_relations, a.nd, a.op,
+        num_entities, num_relations, a.nd, a.op,
         a.order, a.op_resid, getattr(a, "rank", 2),
         getattr(a, "unit_norm", False), quat_init=False,
     ).to(device)
     model.entity_emb.weight.data.copy_(ck["entity_emb"].to(device))
     model.ops.load_state_dict({k: v.to(device) for k, v in ck["ops"].items()})
     model.eval()
-    print(f"Loaded checkpoint '{path}'  dataset={a.dataset}  op={a.op}  nd={a.nd}  "
-          f"order={getattr(a,'order','-')}  epoch={ck.get('epoch','?')}")
-    return model, a, train_ds, valid_ds, test_ds
+    return model, a
+
+
+def load_datasets(dataset):
+    """The three KGTripleDataset splits (train/valid/test) with inverse triples, for eval."""
+    return (KGTripleDataset(dataset, "train", create_inverse=True),
+            KGTripleDataset(dataset, "valid", create_inverse=True),
+            KGTripleDataset(dataset, "test",  create_inverse=True))
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +410,11 @@ def main():
     )
     print(f"device={device}")
 
-    model, ckpt_args, train_ds, valid_ds, test_ds = load_checkpoint(args.checkpoint, device)
+    ck = load_checkpoint(args.checkpoint, device)
+    model, ckpt_args = build_model(ck, device)                       # from the checkpoint alone
+    train_ds, valid_ds, test_ds = load_datasets(ckpt_args.dataset)   # for the eval itself
+    print(f"Loaded checkpoint '{args.checkpoint}'  dataset={ckpt_args.dataset}  op={ckpt_args.op}  "
+          f"nd={ckpt_args.nd}  order={getattr(ckpt_args,'order','-')}  epoch={ck.get('epoch','?')}")
     score_mode = args.score or getattr(ckpt_args, "score", "cos")
     print(f"score_mode={score_mode}")
 
