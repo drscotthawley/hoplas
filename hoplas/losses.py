@@ -73,17 +73,17 @@ def SIGReg(x, global_step, num_slices=256, chunk_size=32):
         return T_total
 
 
-def InfoNCE(pred, tgt, temp=0.05):
-    """In-batch cosine-InfoNCE negative-repulsion loss. pred, tgt: (N, D) index-aligned
-    pairs; each pred must pick its own tgt (the diagonal) out of all N tgts in the batch,
+def InfoNCE(pred, targ, temp=0.05):
+    """In-batch cosine-InfoNCE negative-repulsion loss. pred, targ: (N, D) index-aligned
+    pairs; each pred must pick its own targ (the diagonal) out of all N targs in the batch,
     under cosine similarity at temperature `temp`. This is the in-batch negative term that
     lifted the KGE results; shared by train_kge.py (op(h) vs tail) and train_ops.py
     (op(x) vs target).
 
-    NB: with few distinct classes (e.g. MNIST's 10) many in-batch tgts share a class and
+    NB: with few distinct classes (e.g. MNIST's 10) many in-batch targs share a class and
     so act as (false) negatives — the term bites harder there than in the KGE entity table.
     """
     pn = F.normalize(pred, dim=-1)
-    tn = F.normalize(tgt, dim=-1)
+    tn = F.normalize(targ, dim=-1)
     logits = (pn @ tn.t()) / temp
     return F.cross_entropy(logits, torch.arange(pred.size(0), device=pred.device))
