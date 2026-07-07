@@ -18,7 +18,8 @@ from hoplas.data import LineDataset, EncodingsDataset
 from hoplas.inference import make_class_ordered_images, make_viz_grids
 from hoplas.models import Projector
 from hoplas.ops import OpWrapper
-from hoplas.losses import SIGReg, MomMatchLoss
+from hoplas.losses import SIGReg, MomMatchLoss, InfoNCE
+from hoplas.schedulers import WarmupThenPlateauWithReduction
 
 
 def freeze_quaternion(ph_layer):
@@ -34,24 +35,6 @@ def freeze_quaternion(ph_layer):
     ph_layer.a.requires_grad_(False)
 from hoplas.vae import load_vae
 from hoplas.viz import embedding_scatter3d, fit_pca, SECONDARY_SCALES
-
-
-class WarmupThenPlateauWithReduction:
-    """Linear LR warmup for the first `boundary` epochs, then ReduceLROnPlateau.
-
-    SequentialLR can't hold ReduceLROnPlateau (it's metric-driven, not an LRScheduler),
-    so this thin router does the phase switch instead. Call once per epoch:
-        scheduler.step(metric, epoch)
-    The warmup scheduler ignores `metric`; the plateau scheduler ignores `epoch`.
-    """
-    def __init__(self, warmup, plateau, boundary):
-        self.warmup, self.plateau, self.boundary = warmup, plateau, boundary
-
-    def step(self, metric, epoch):
-        if self.warmup is not None and epoch <= self.boundary:
-            self.warmup.step()
-        else:
-            self.plateau.step(metric)
 
 
 @torch.no_grad()
@@ -74,7 +57,8 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
                                   diag=args.mom_diag, cov_weight=args.mom_cov_weight, return_stats=True)
         sigreg = 0.5 * (SIGReg(xproj_t, global_step=epoch) + SIGReg(yproj, global_step=epoch))
         recon = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))
-        loss = (1 - args.lambd) * (args.lambda_sim * sim + args.lambda_mom * mom) + args.lambd * sigreg + args.lambda_recon * recon
+        neg = InfoNCE(xproj_t, yproj, args.neg_temp) if args.lambda_neg > 0 else 0.0
+        loss = (1 - args.lambd) * (args.lambda_sim * sim + args.lambda_mom * mom + args.lambda_neg * neg) + args.lambd * sigreg + args.lambda_recon * recon
         bs = xb.size(0)
         tot_loss += loss.item() * bs; tot_sim += sim.item() * bs; tot_mom += mom.item() * bs
         tot_sigreg += sigreg.item() * bs; tot_recon += recon.item() * bs
@@ -106,8 +90,8 @@ def train(args):
         val_dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, debug=False, len=5000, target=args.target)
     else:
         pt = _PT_PATHS[args.dataset]
-        dataset = EncodingsDataset(pt_path=pt, split="train")
-        val_dataset = EncodingsDataset(pt_path=pt, split="test", debug=False)
+        dataset = EncodingsDataset(pt_path=pt, split="train", target=args.target)
+        val_dataset = EncodingsDataset(pt_path=pt, split="test", debug=False, target=args.target)
         args.nd = dataset.nd
     if args.pnd is None:
         args.pnd = args.nd
@@ -133,7 +117,9 @@ def train(args):
         project = f"line-{line_kind}"
     else:
         wandb_name = ckpt_name = f"{args.dataset}_{op_part}"
-        project = {"mnist": "ring-mnist", "cifar": "ring-cifar"}[args.dataset]
+        # multi-head run = dihedral (ring T + reflect I); single head = its own target
+        kind = "dihedral" if (args.op_list and len(args.op_list) > 1) else args.target
+        project = f"{kind}-{args.dataset}"  # ring-/reflect-/dihedral-mnist (cifar likewise)
     if not args.no_wandb:
         wandb.init(project=project, name=wandb_name, config=vars(args))
         # index every logged metric/media by epoch, so panel sliders (incl. images) read in epochs, not steps
@@ -145,7 +131,7 @@ def train(args):
     if args.op == "quat":
         freeze_quaternion(trans_op.op)
     # inverse projector: maps pnd back to nd (unit_norm=False: output isn't on the sphere)
-    inv_proj = Projector(nd=args.pnd, pnd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, unit_norm=False).to(device)
+    inv_proj = Projector(nd=args.pnd, pnd=args.nd, n_hid=args.n_hid, n_layers=args.proj_layers, proj_resid=args.proj_resid, unit_norm=False).to(device)
 
     # Frozen-geometry mode: load proj/inv_proj weights and freeze them, so only the op trains against
     # the fixed embedding (pure supervised). recon becomes constant. Geometry args were inherited as
@@ -221,17 +207,23 @@ def train(args):
         # xproj_t hide inside yproj's spread, halving the anti-collapse pressure
         sigreg_loss = 0.5 * (SIGReg(xproj_t, global_step=epoch) + SIGReg(yproj, global_step=epoch))
         recon_loss = sim_fn(torch.cat([xprime, yprime]), torch.cat([xb, yb]))  # inv_proj sees both x and y
-        loss = (1 - args.lambd) * (args.lambda_sim * sim_loss + args.lambda_mom * mom_loss) + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
-        # secondary heads: supervised sim on their own target; detached so they don't reshape the geometry
+        # in-batch negative repulsion on the primary op (0 disables); shared with train_kge.py
+        neg_loss = InfoNCE(xproj_t, yproj, args.neg_temp) if args.lambda_neg > 0 else xproj_t.new_zeros(())
+        loss = (1 - args.lambd) * (args.lambda_sim * sim_loss + args.lambda_mom * mom_loss + args.lambda_neg * neg_loss) + args.lambd * sigreg_loss + args.lambda_recon * recon_loss
+        # secondary heads: supervised sim (+ the same negative repulsion) on their own target
         sec_sim = 0.0
+        sec_neg = 0.0
         for h in sec_heads:
             src = xproj.detach() if h["detach"] else xproj
             h_tgt = proj(dataset.sample_target(labels, h["target"])[0]).detach()
-            sec_sim = sec_sim + sim_fn(h["op"](src), h_tgt)
+            h_pred = h["op"](src)
+            sec_sim = sec_sim + sim_fn(h_pred, h_tgt)
+            if args.lambda_neg > 0:
+                sec_neg = sec_neg + InfoNCE(h_pred, h_tgt, args.neg_temp)
         if sec_heads:
-            loss = loss + (1 - args.lambd) * args.lambda_sim * sec_sim
+            loss = loss + (1 - args.lambd) * (args.lambda_sim * sec_sim + args.lambda_neg * sec_neg)
         comp = {"loss": float(loss), "sim": float(sim_loss), "mom": float(mom_loss),
-                "sigreg": float(sigreg_loss), "recon": float(recon_loss),
+                "sigreg": float(sigreg_loss), "recon": float(recon_loss), "neg": float(neg_loss),
                 "sec_sim": float(sec_sim) if sec_heads else 0.0}
         return loss, comp
 
@@ -247,7 +239,7 @@ def train(args):
 
     try:
         for epoch in range(1, args.epochs + 1):
-            totals = dict(loss=0.0, sim=0.0, mom=0.0, sigreg=0.0, recon=0.0, sec_sim=0.0)
+            totals = dict(loss=0.0, sim=0.0, mom=0.0, sigreg=0.0, recon=0.0, neg=0.0, sec_sim=0.0)
             pbar = tqdm(loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
             for x, y in pbar:
                 xb, yb = x['data'].to(device), y['data'].to(device)
@@ -291,7 +283,7 @@ def train(args):
                 log = {"epoch": epoch, "loss": avg["loss"], "lr": opt_proj.param_groups[0]["lr"],
                        "op_lr": opt_op.param_groups[0]["lr"],
                        "sim_loss": avg["sim"], "sim_ema": sim_ema, "mom_loss": avg["mom"],
-                       "sigreg_loss": avg["sigreg"], "recon_loss": avg["recon"]}
+                       "sigreg_loss": avg["sigreg"], "recon_loss": avg["recon"], "neg_loss": avg["neg"]}
                 if sec_heads:
                     log["sec_sim_loss"] = avg["sec_sim"]
                 if op_angle is not None:
@@ -316,11 +308,15 @@ def train(args):
                                 names=("y2proj", "xproj_t2"), scales=SECONDARY_SCALES,
                                 pca=pca, max_points=args.max_viz_points)
                 if vae is not None and args.inf_every > 0 and epoch % args.inf_every == 0:
-                    for m in (proj, trans_op, inv_proj): m.eval()
-                    imgs_in, imgs_recon, imgs_xform = make_viz_grids(vae, proj, trans_op, inv_proj, viz_imgs)
-                    for m in (proj, trans_op, inv_proj): m.train()
+                    viz_ops = [proj, trans_op, inv_proj] + [h["op"] for h in sec_heads]
+                    for m in viz_ops: m.eval()
+                    imgs_in, imgs_recon, imgs_xform, sec_imgs = make_viz_grids(
+                        vae, proj, trans_op, inv_proj, viz_imgs, sec_heads=sec_heads)
+                    for m in viz_ops: m.train()
                     def _wimg(t): return wandb.Image(make_grid(t, nrow=10).permute(1,2,0).numpy(), caption=f"epoch {epoch}")
                     log.update({f"{args.dataset}_input": _wimg(imgs_in), f"{args.dataset}_recon": _wimg(imgs_recon), f"{args.dataset}_transformed": _wimg(imgs_xform)})
+                    # each secondary head (e.g. ph_reflect) decoded to pixels: digit i -> (n-i) for a clean involution
+                    log.update({f"{args.dataset}_{name}": _wimg(grid) for name, grid in sec_imgs.items()})
                 wandb.log(log)
     except KeyboardInterrupt:
         print("\ninterrupted — finishing run")
@@ -350,6 +346,10 @@ def main():
                    help="Weight on inv_proj autoencoder reconstruction loss (0 disables)")
     p.add_argument("--lambda-sim", type=float, default=0.5,
                    help="Weight on MSE sim inside the non-sigreg group: (1-lambd)*(lambda_sim*sim + lambda_mom*mom)")
+    p.add_argument("--lambda-neg", type=float, default=0.0,
+                   help="in-batch cosine-InfoNCE negative-repulsion weight (0 disables); applied to the "
+                        "primary op and every secondary head. Shared loss (InfoNCE) with train_kge.py.")
+    p.add_argument("--neg-temp", type=float, default=0.05, help="temperature for the contrastive/neg term")
     p.add_argument("--lr", type=float, default=0.002)
     p.add_argument("--lr-patience", type=int, default=50, help="ReduceLROnPlateau patience (epochs)")
     p.add_argument("--max-viz-points", type=int, default=1000,
