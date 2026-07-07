@@ -28,6 +28,9 @@ Examples:
   ./scripts/launch_queue.sh lecun
   ./scripts/launch_queue.sh lecun --par 3 --gpu 1 configs/mnist_ph*.cfg
   ./scripts/launch_queue.sh lecun configs/mnist_ph_16_no*.cfg
+  ./scripts/launch_queue.sh lecun --par 3 configs/kge_*.cfg   # KGE task (train_kge.py)
+
+Task is auto-selected per config: kge_*.cfg -> train_kge.py, else train_ops.py.
 EOF
     exit 0
 fi
@@ -71,7 +74,7 @@ echo "Syncing source to ${HOST}:${REMOTE_REPO}..."
 rsync -az --exclude='*.pyc' --exclude='__pycache__' --exclude='.git' \
     --exclude='wandb' --exclude='checkpoints' --exclude='*.pt' \
     "${REPO_DIR}/hoplas/" "${HOST}:${REMOTE_REPO}/hoplas/"
-rsync -az "${REPO_DIR}/train_ops.py" "${HOST}:${REMOTE_REPO}/"
+rsync -az "${REPO_DIR}/train_ops.py" "${REPO_DIR}/train_kge.py" "${HOST}:${REMOTE_REPO}/"
 rsync -az "${REPO_DIR}/configs/" "${HOST}:${REMOTE_REPO}/configs/"
 $SSH "${HOST}" "mkdir -p ${REMOTE_REPO}/logs ${REMOTE_REPO}/checkpoints"
 echo ""
@@ -85,6 +88,8 @@ launch_next() {
     local config="${QUEUE[$QUEUE_IDX]}"
     QUEUE_IDX=$((QUEUE_IDX + 1))
     local remote_config="${REMOTE_REPO}/configs/${config}.cfg"
+    # task-aware: kge_*.cfg -> train_kge.py (KGE task); everything else -> train_ops.py (ring task)
+    local train_script; [[ "$config" == kge_* ]] && train_script="train_kge.py" || train_script="train_ops.py"
     # inject nd<N> (read from inside the config) into the log name so nd3 vs nd16 runs are distinguishable
     local nd log_name
     nd=$(grep -E '^[[:space:]]*nd[[:space:]]*=' "${REPO_DIR}/configs/${config}.cfg" 2>/dev/null | head -1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')
@@ -96,7 +101,7 @@ launch_next() {
 #!/bin/bash
 source ${REMOTE_ENV}/bin/activate
 cd ${REMOTE_REPO}
-CUDA_VISIBLE_DEVICES=${GPU} nohup python train_ops.py --config ${remote_config} \
+CUDA_VISIBLE_DEVICES=${GPU} nohup python ${train_script} --config ${remote_config} \
     > ${log} 2>&1 &
 echo \$!
 EOF
