@@ -35,7 +35,14 @@ case "$3" in /*) REPO="$3";; *) REPO="$HOME/$3";; esac
 case "$4" in /*) ENV="$4";;  *) ENV="$HOME/$4";; esac
 source "$ENV/bin/activate"
 cd "$REPO"
-python "$TRAIN" --config "configs/${CFG}.cfg" \
-    --epochs 2 --nd 8 --batch-size 8192 --cpu --no-wandb --eval-every 0
+if [ "$TRAIN" = "train_kge.py" ]; then
+    python "$TRAIN" --config "configs/${CFG}.cfg" \
+        --epochs 2 --nd 8 --batch-size 8192 --cpu --no-wandb --eval-every 0
+else
+    # ring task (train_ops.py): --val-every 1 exercises the new closure/planarity metrics;
+    # --warmup 0 lets the best-checkpoint save path run too. Uses the config's nd.
+    python "$TRAIN" --config "configs/${CFG}.cfg" \
+        --epochs 2 --batch-size 8192 --cpu --no-wandb --val-every 1 --warmup 0
+fi
 echo "smoke exit code: $?"
 ENDSSH
