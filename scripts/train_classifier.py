@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
+import wandb
 from hoplas.classifier import SmallResNet, IN_CHANNELS, N_CLASSES, _ckpt_path, CHECKPOINTS_DIR
 
 
@@ -111,31 +112,41 @@ def train(args):
     save_path = _ckpt_path(args.dataset)
     best_acc = 0.0
 
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        tot_loss = 0.0
-        pbar = tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
-        for x, y in pbar:
-            x, y = x.to(device), y.to(device)
-            optimizer.zero_grad()
-            loss = F.cross_entropy(model(x), y)
-            loss.backward()
-            optimizer.step()
-            tot_loss += loss.item() * x.size(0)
-            pbar.set_postfix(loss=f"{loss.item():.3f}")
-        scheduler.step()
+    if not args.no_wandb:
+        wandb.init(project="hoplas-classifier", name=f"{args.dataset}_clf", config=vars(args))
 
-        avg_loss = tot_loss / len(train_loader.dataset)
-        acc = evaluate(model, test_loader, device)
-        marker = ""
-        if acc > best_acc:
-            best_acc = acc
-            torch.save({"state_dict": model.state_dict(),
-                        "dataset": args.dataset,
-                        "epoch": epoch,
-                        "test_acc": acc}, save_path)
-            marker = "  ← saved"
-        print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.4f}  test_acc={acc:.4f}  best={best_acc:.4f}{marker}")
+    try:
+        for epoch in range(1, args.epochs + 1):
+            model.train()
+            tot_loss = 0.0
+            pbar = tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
+            for x, y in pbar:
+                x, y = x.to(device), y.to(device)
+                optimizer.zero_grad()
+                loss = F.cross_entropy(model(x), y)
+                loss.backward()
+                optimizer.step()
+                tot_loss += loss.item() * x.size(0)
+                pbar.set_postfix(loss=f"{loss.item():.3f}")
+            scheduler.step()
+
+            avg_loss = tot_loss / len(train_loader.dataset)
+            acc = evaluate(model, test_loader, device)
+            marker = ""
+            if acc > best_acc:
+                best_acc = acc
+                torch.save({"state_dict": model.state_dict(),
+                            "dataset": args.dataset,
+                            "epoch": epoch,
+                            "test_acc": acc}, save_path)
+                marker = "  ← saved"
+            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.4f}  test_acc={acc:.4f}  best={best_acc:.4f}{marker}")
+            if wandb.run is not None:
+                wandb.log({"epoch": epoch, "loss": avg_loss, "test_acc": acc,
+                           "best_acc": best_acc, "lr": scheduler.get_last_lr()[0]})
+    finally:
+        if wandb.run is not None:
+            wandb.finish()
 
     print(f"\nDone. Best test accuracy (ceiling): {best_acc:.4f}")
     print(f"Checkpoint: {save_path}")
@@ -150,6 +161,7 @@ def main():
     p.add_argument("--lr",           type=float, default=3e-4, help="Peak learning rate (cosine annealed)")
     p.add_argument("--num-workers",  type=int,   default=4,    help="DataLoader worker processes")
     p.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
+    p.add_argument("--no-wandb",     action="store_true",       help="Disable Weights & Biases logging")
     args = p.parse_args()
     train(args)
 
