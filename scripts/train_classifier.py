@@ -43,6 +43,18 @@ def build_transforms(dataset: str, train: bool):
             ])
         return transforms.ToTensor()
 
+    if dataset == "fashion":
+        # MNIST-style, but hflip is safe (mirror-invariant garment classes) and no color (grayscale).
+        if train:
+            return transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomRotation(15),
+                transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+                transforms.ToTensor(),
+                transforms.RandomErasing(p=0.3, scale=(0.02, 0.15)),
+            ])
+        return transforms.ToTensor()
+
     # cifar10
     if train:
         return transforms.Compose([
@@ -58,10 +70,7 @@ def build_transforms(dataset: str, train: bool):
 
 def build_loaders(dataset: str, batch_size: int, num_workers: int):
     root = os.path.expanduser(f"~/datasets/{dataset}")
-    if dataset == "mnist":
-        cls = datasets.MNIST
-    else:
-        cls = datasets.CIFAR10
+    cls = {"mnist": datasets.MNIST, "fashion": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}[dataset]
     train_ds = cls(root=root, train=True,  download=True, transform=build_transforms(dataset, True))
     test_ds  = cls(root=root, train=False, download=True, transform=build_transforms(dataset, False))
     kw = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
@@ -134,7 +143,7 @@ def train(args):
 
 def main():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--dataset",      choices=["mnist", "cifar10"], default="mnist",  help="Dataset to train on")
+    p.add_argument("--dataset",      choices=["mnist", "fashion", "cifar10"], default="mnist",  help="Dataset to train on")
     p.add_argument("--batch-size",   type=int,   default=256,  help="Mini-batch size")
     p.add_argument("--cpu",          action="store_true",       help="Force CPU even if GPU/MPS available")
     p.add_argument("--epochs",       type=int,   default=30,   help="Number of training epochs")

@@ -21,8 +21,8 @@ import torch.nn.functional as F
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHECKPOINTS_DIR = os.path.join(REPO_ROOT, "checkpoints")
 
-N_CLASSES = {"mnist": 10, "cifar10": 10}
-IN_CHANNELS = {"mnist": 1, "cifar10": 3}
+N_CLASSES = {"mnist": 10, "fashion": 10, "cifar10": 10}
+IN_CHANNELS = {"mnist": 1, "fashion": 1, "cifar10": 3}
 
 
 class _ResBlock(nn.Module):

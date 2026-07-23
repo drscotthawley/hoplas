@@ -10,6 +10,7 @@
 # Each <item> is one of:
 #   configs/x.cfg (or a glob)  -> train_ops.py  (train_kge.py for kge_* configs)
 #   vae:<dataset>              -> scripts/train_vae.py --dataset <dataset>  (cifar10|fashion|mnist)
+#   clf:<dataset>              -> scripts/train_classifier.py --dataset <dataset>  (mnist|fashion|cifar10)
 # (This replaces the retired launch.sh / launch_queue.sh: a single config is just a 1-item queue.)
 #
 # Anything after a literal "--" is passed through to every launched job (validated to plain
@@ -65,6 +66,7 @@ rsync -az "${REPO_DIR}/configs/" "${HOST}:${REPO_ARG}/configs/"
 rsync -az "${REPO_DIR}/scripts/remote_runner.sh" "${HOST}:${REPO_ARG}/remote_runner.sh"
 $SSH "${HOST}" "mkdir -p ${REPO_ARG}/scripts"
 rsync -az "${REPO_DIR}/scripts/train_vae.py" "${HOST}:${REPO_ARG}/scripts/train_vae.py"
+rsync -az "${REPO_DIR}/scripts/train_classifier.py" "${HOST}:${REPO_ARG}/scripts/train_classifier.py"
 
 $SSH "${HOST}" bash -s -- "$PAR" "$GPU" "$POLL" "$REPO_ARG" "$ENV_ARG" "${CONFIGS[@]}" -- "${EXTRA[@]}" << 'ENDSSH'
 PAR="$1"; GPU="$2"; POLL="$3"; RA="$4"; EA="$5"; shift 5

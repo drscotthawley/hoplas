@@ -27,12 +27,13 @@ n_running()   {
     # another train proc, a real job's parent is the shell/nohup. (train_vae.py uses num_workers>0,
     # so a plain `ps|grep -c` counts ~5 procs per job and would blow past --par.)
     ps -eo pid,ppid,args | awk '
-        /[t]rain_(kge|ops|vae)\.py/ { pid[$1]=1; par[$1]=$2 }
+        /[t]rain_(kge|ops|vae|classifier)\.py/ { pid[$1]=1; par[$1]=$2 }
         END { for (p in pid) if (!(par[p] in pid)) c++; print c+0 }'
 }
 is_running()  {
     case "$1" in
         vae:*) ps -eo args | grep -E '[t]rain_vae\.py' | grep -qF -- "--dataset ${1#vae:}" ;;
+        clf:*) ps -eo args | grep -E '[t]rain_classifier\.py' | grep -qF -- "--dataset ${1#clf:}" ;;
         *)     ps -eo args | grep -E '[t]rain_(kge|ops)\.py' | grep -qF "/$1.cfg" ;;
     esac
 }
@@ -45,6 +46,13 @@ launch() {
         CUDA_VISIBLE_DEVICES="$GPU" nohup python scripts/train_vae.py --dataset "$ds" "${EXTRA[@]}" \
             > "$REPO/logs/vae_$ds.log" 2>&1 &
         echo "[$(date '+%F %T')] launched vae:$ds (train_vae.py) pid $! -> logs/vae_$ds.log"
+        return
+    fi
+    if [[ "$item" == clf:* ]]; then
+        local ds="${item#clf:}"
+        CUDA_VISIBLE_DEVICES="$GPU" nohup python scripts/train_classifier.py --dataset "$ds" "${EXTRA[@]}" \
+            > "$REPO/logs/clf_$ds.log" 2>&1 &
+        echo "[$(date '+%F %T')] launched clf:$ds (train_classifier.py) pid $! -> logs/clf_$ds.log"
         return
     fi
     local cfg="$item" train logname="$item"
