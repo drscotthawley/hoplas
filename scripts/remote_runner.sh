@@ -55,6 +55,13 @@ launch() {
         echo "[$(date '+%F %T')] launched clf:$ds (train_classifier.py) pid $! -> logs/clf_$ds.log"
         return
     fi
+    if [[ "$item" == recon:* ]]; then
+        local ds="${item#recon:}"
+        CUDA_VISIBLE_DEVICES="$GPU" nohup python scripts/score_recon.py --dataset "$ds" "${EXTRA[@]}" \
+            > "$REPO/logs/recon_$ds.log" 2>&1 &
+        echo "[$(date '+%F %T')] launched recon:$ds (score_recon.py) pid $! -> logs/recon_$ds.log"
+        return
+    fi
     local cfg="$item" train logname="$item"
     [[ "$cfg" == kge_* ]] && train=train_kge.py || train=train_ops.py
     # nd-logname: line_* configs without _nd in the name get nd<N> (read from the config) injected,
