@@ -42,10 +42,14 @@ done_already(){ local L="$REPO/logs/$1.log"; [ -f "$L" ] && tr '\r' '\n' < "$L" 
 launch() {
     local item="$1"
     if [[ "$item" == vae:* ]]; then
-        local ds="${item#vae:}"
+        # vae:<dataset> or vae:<dataset>:<tag>; the tag only distinguishes the log name so
+        # multiple configs of one dataset can run concurrently without clobbering each other.
+        local rest="${item#vae:}" ds tag logname
+        ds="${rest%%:*}"; tag="${rest#*:}"; [[ "$tag" == "$rest" ]] && tag=""
+        logname="vae_$ds"; [[ -n "$tag" ]] && logname="vae_${ds}_$tag"
         CUDA_VISIBLE_DEVICES="$GPU" nohup python scripts/train_vae.py --dataset "$ds" "${EXTRA[@]}" \
-            > "$REPO/logs/vae_$ds.log" 2>&1 &
-        echo "[$(date '+%F %T')] launched vae:$ds (train_vae.py) pid $! -> logs/vae_$ds.log"
+            > "$REPO/logs/$logname.log" 2>&1 &
+        echo "[$(date '+%F %T')] launched vae:$rest (train_vae.py) pid $! -> logs/$logname.log"
         return
     fi
     if [[ "$item" == clf:* ]]; then
