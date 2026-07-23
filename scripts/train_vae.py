@@ -76,7 +76,13 @@ class VGGPerceptual(torch.nn.Module):
     Gives the decoder a gradient toward *perceptual* similarity, countering pure pixel MSE's
     blur (MSE predicts the pixelwise mean of plausible outputs). VGG weights are frozen; grads
     still flow through it to the decoder."""
-    def __init__(self, layers=(3, 8, 15)):   # relu1_2, relu2_2, relu3_3 in vgg16.features
+    def __init__(self, layers=(3, 8, 15), deep=False):
+        # relu1_2(3), relu2_2(8), relu3_3(15) in vgg16.features -- edge/shape-dominant.
+        # deep=True adds relu4_3(22), which encodes more texture/pattern (e.g. plaid, weave) --
+        # shallow layers alone can under-penalize a flat-gray reconstruction of a textured
+        # garment since local edges are still roughly right even when the pattern is gone.
+        if deep:
+            layers = tuple(layers) + (22,)
         super().__init__()
         from torchvision.models import vgg16, VGG16_Weights
         feats = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.eval()
@@ -134,9 +140,9 @@ def train(args):
     optimizer = torch.optim.AdamW([{"params": decay,    "weight_decay": args.weight_decay},
                                    {"params": no_decay, "weight_decay": 0.0}], lr=args.lr)
 
-    perceptual = VGGPerceptual().to(device) if args.perceptual_weight > 0 else None
+    perceptual = VGGPerceptual(deep=args.perceptual_deep).to(device) if args.perceptual_weight > 0 else None
     if perceptual is not None:
-        print(f"perceptual loss: VGG16 features, weight={args.perceptual_weight}")
+        print(f"perceptual loss: VGG16 features (deep={args.perceptual_deep}), weight={args.perceptual_weight}")
 
     save_path = args.save_path or os.path.join(WEIGHTS_DIR, cfg["ckpt"])
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
@@ -240,6 +246,7 @@ def main():
     p.add_argument("--latent-dim",         type=int,   default=128)
     p.add_argument("--lr",                 type=float, default=2e-4)
     p.add_argument("--perceptual-weight",  type=float, default=0.0, help="Weight on VGG16-feature (perceptual) recon loss; 0 = pure MSE")
+    p.add_argument("--perceptual-deep",    action="store_true", help="Add a deeper VGG layer (relu4_3) for texture/pattern sensitivity (e.g. plaid), not just edges/shape")
     p.add_argument("--no-wandb",           action="store_true")
     p.add_argument("--save-path",          type=str,   default=None,  help="Override default save path")
     p.add_argument("--seed",               type=int,   default=42)
