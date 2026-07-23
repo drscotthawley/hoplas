@@ -71,6 +71,40 @@ def _to_wandb_img(grid):
     return wandb.Image(arr[:, :, 0] if arr.shape[2] == 1 else arr)
 
 
+class VGGPerceptual(torch.nn.Module):
+    """Frozen VGG16 feature-space L2 loss. Inputs in [0,1]; grayscale is expanded to 3ch.
+    Gives the decoder a gradient toward *perceptual* similarity, countering pure pixel MSE's
+    blur (MSE predicts the pixelwise mean of plausible outputs). VGG weights are frozen; grads
+    still flow through it to the decoder."""
+    def __init__(self, layers=(3, 8, 15)):   # relu1_2, relu2_2, relu3_3 in vgg16.features
+        super().__init__()
+        from torchvision.models import vgg16, VGG16_Weights
+        feats = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.eval()
+        for p in feats.parameters():
+            p.requires_grad_(False)
+        self.feats = feats
+        self.layers = set(layers)
+        self.max_layer = max(layers)
+        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("std",  torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+    def _prep(self, x):
+        if x.size(1) == 1:
+            x = x.repeat(1, 3, 1, 1)
+        return (x - self.mean) / self.std
+
+    def forward(self, recon, target):
+        r, t = self._prep(recon), self._prep(target)
+        loss = 0.0
+        for i, layer in enumerate(self.feats):
+            r, t = layer(r), layer(t)
+            if i in self.layers:
+                loss = loss + F.mse_loss(r, t)
+            if i >= self.max_layer:
+                break
+        return loss
+
+
 def train(args):
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available()
@@ -100,9 +134,13 @@ def train(args):
     optimizer = torch.optim.AdamW([{"params": decay,    "weight_decay": args.weight_decay},
                                    {"params": no_decay, "weight_decay": 0.0}], lr=args.lr)
 
+    perceptual = VGGPerceptual().to(device) if args.perceptual_weight > 0 else None
+    if perceptual is not None:
+        print(f"perceptual loss: VGG16 features, weight={args.perceptual_weight}")
+
     save_path = args.save_path or os.path.join(WEIGHTS_DIR, cfg["ckpt"])
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
-    best_val_recon = float("inf")
+    best_val_metric = float("inf")
 
     if not args.no_wandb:
         wandb.init(project="hoplas-vae", name=f"{args.dataset}_beta{args.beta}_d{args.latent_dim}", config=vars(args))
@@ -122,6 +160,8 @@ def train(args):
                 optimizer.zero_grad()
                 recon, mu, logvar = model(x)
                 loss, recon_loss, kld = vae_loss(recon, x, mu, logvar, beta, args.free_bits)
+                if perceptual is not None:
+                    loss = loss + args.perceptual_weight * perceptual(recon, x)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
@@ -134,7 +174,7 @@ def train(args):
             print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.4f}  recon={avg_recon:.4f}  kld={avg_kld:.4f}  beta={beta:.3f}")
 
             model.eval()
-            val_tot = val_recon_tot = val_kld_tot = 0.0
+            val_tot = val_recon_tot = val_kld_tot = val_perc_tot = 0.0
             with torch.no_grad():
                 for x, _ in val_loader:
                     x = x.to(device)
@@ -142,19 +182,26 @@ def train(args):
                     loss, recon_loss, kld = vae_loss(recon, x, mu, logvar, beta, args.free_bits)
                     bs = x.size(0)
                     val_tot += loss.item() * bs; val_recon_tot += recon_loss.item() * bs; val_kld_tot += kld.item() * bs
+                    if perceptual is not None:
+                        val_perc_tot += perceptual(recon, x).item() * bs
             nv = len(val_ds)
             val_loss, val_recon, val_kld = val_tot/nv, val_recon_tot/nv, val_kld_tot/nv
-            print(f"       val  loss={val_loss:.4f}  recon={val_recon:.4f}  kld={val_kld:.4f}")
+            val_perc = val_perc_tot / nv
+            # Select on reconstruction fidelity, including the perceptual term when it's active:
+            # pure-MSE selection would prefer the blurrier (lower-MSE) checkpoint and undo the gain.
+            val_metric = val_recon + args.perceptual_weight * val_perc
+            print(f"       val  loss={val_loss:.4f}  recon={val_recon:.4f}  perc={val_perc:.4f}  kld={val_kld:.4f}")
 
-            if val_recon < best_val_recon:
-                best_val_recon = val_recon
+            if val_metric < best_val_metric:
+                best_val_metric = val_metric
                 sd = ema.state_dict() if ema else model.state_dict()
-                torch.save({"spec": spec, "state_dict": sd, "epoch": epoch, "val_recon": val_recon}, save_path)
-                print(f"  → saved checkpoint (val_recon={val_recon:.4f})")
+                torch.save({"spec": spec, "state_dict": sd, "epoch": epoch,
+                            "val_recon": val_recon, "val_perc": val_perc}, save_path)
+                print(f"  → saved checkpoint (val_metric={val_metric:.4f})")
 
             if wandb.run is not None:
                 log = {"epoch": epoch, "loss": avg_loss, "recon_loss": avg_recon, "kld": avg_kld, "beta": beta,
-                       "val_loss": val_loss, "val_recon": val_recon, "val_kld": val_kld}
+                       "val_loss": val_loss, "val_recon": val_recon, "val_perc": val_perc, "val_kld": val_kld}
                 if epoch % args.img_every == 0 or epoch == 1:
                     with torch.no_grad():
                         recon_fixed, _, _ = model(val_imgs_fixed)
@@ -192,6 +239,7 @@ def main():
     p.add_argument("--img-every",          type=int,   default=10,    help="Log recon/prior grids to W&B every N epochs")
     p.add_argument("--latent-dim",         type=int,   default=128)
     p.add_argument("--lr",                 type=float, default=2e-4)
+    p.add_argument("--perceptual-weight",  type=float, default=0.0, help="Weight on VGG16-feature (perceptual) recon loss; 0 = pure MSE")
     p.add_argument("--no-wandb",           action="store_true")
     p.add_argument("--save-path",          type=str,   default=None,  help="Override default save path")
     p.add_argument("--seed",               type=int,   default=42)
