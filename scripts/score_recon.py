@@ -40,6 +40,27 @@ def accuracies(vae, clf, loader, device):
     return clean_c / total, recon_c / total
 
 
+@torch.no_grad()
+def compute_fid(vae, loader, device):
+    """recon-FID: Frechet Inception Distance between real test images and their
+    k=0 reconstructions. Independent of the training loss (Inception features). Lower = better.
+    Returns None if torchmetrics isn't available."""
+    try:
+        from torchmetrics.image.fid import FrechetInceptionDistance
+    except ImportError:
+        return None
+    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+    for x, _ in loader:
+        x = x.to(device)
+        mu, _ = vae.encoder(x)
+        recon = vae.decoder(mu).clamp(0, 1)
+        real = x if x.size(1) == 3 else x.repeat(1, 3, 1, 1)          # Inception wants 3ch, [0,1]
+        fake = recon if recon.size(1) == 3 else recon.repeat(1, 3, 1, 1)
+        fid.update(real, real=True)
+        fid.update(fake, real=False)
+    return fid.compute().item()
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--dataset", choices=list(_DS), required=True)
@@ -65,6 +86,11 @@ def main():
     print(f"[{args.dataset}] classifier clean acc                 = {clean:.4f}")
     print(f"[{args.dataset}] k=0 reconstruction ceiling           = {recon:.4f}")
     print(f"[{args.dataset}] round-trip cost (clean - recon)      = {clean - recon:+.4f}")
+    fid = compute_fid(vae, loader, device)
+    if fid is not None:
+        print(f"[{args.dataset}] recon-FID (real vs decode, lower=better) = {fid:.2f}")
+    else:
+        print(f"[{args.dataset}] recon-FID: skipped (torchmetrics unavailable)")
 
 
 if __name__ == "__main__":
