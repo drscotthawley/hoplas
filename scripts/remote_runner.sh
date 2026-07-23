@@ -60,10 +60,12 @@ launch() {
         return
     fi
     if [[ "$item" == recon:* ]]; then
-        local ds="${item#recon:}"
+        local rest="${item#recon:}" ds tag logname
+        ds="${rest%%:*}"; tag="${rest#*:}"; [[ "$tag" == "$rest" ]] && tag=""
+        logname="recon_$ds"; [[ -n "$tag" ]] && logname="recon_${ds}_$tag"
         CUDA_VISIBLE_DEVICES="$GPU" nohup python scripts/score_recon.py --dataset "$ds" "${EXTRA[@]}" \
-            > "$REPO/logs/recon_$ds.log" 2>&1 &
-        echo "[$(date '+%F %T')] launched recon:$ds (score_recon.py) pid $! -> logs/recon_$ds.log"
+            > "$REPO/logs/$logname.log" 2>&1 &
+        echo "[$(date '+%F %T')] launched recon:$rest (score_recon.py) pid $! -> logs/$logname.log"
         return
     fi
     local cfg="$item" train logname="$item"

@@ -32,8 +32,12 @@ Checkpoints: `~/datasets/hoplas_vae/<dataset>_vae_<tag>.pt`.
 | c48pw1  | cifar10 | 48  | 1.0 | lecun   | — | — | launched |
 | c256pw1 | cifar10 | 256 | 1.0 | lecun   | — | — | launched |
 | f32pw05 | fashion | 32  | 0.5 | lecun   | — | — | launched |
-| c128pw1 | cifar10 | 128 | 1.0 | tsrazer | — | — | launched |
-| c128pw2 | cifar10 | 128 | 2.0 | tsrazer | — | — | launched |
-| f16pw05 | fashion | 16  | 0.5 | razer   | — | — | launched |
+| c128pw1 | cifar10 | 128 | 1.0 | tsrazer | — | — | trained → on lecun, ready to eval |
+| c128pw2 | cifar10 | 128 | 2.0 | tsrazer | — | — | trained → on lecun, ready to eval |
+| c128pw4 | cifar10 | 128 | 4.0 | tsrazer | — | — | training (pushing perceptual axis) |
+| c128b05 | cifar10 | 128 | 1.0, β=0.5 | tsrazer | — | — | training (less KL smoothing) |
+| f16pw05 | fashion | 16  | 0.5 | lecun   | — | — | training |
+
+*razer unreachable (SSH `kex_exchange_identification` failure on both `razer-ts-docker` and `razer-docker`) — its fashion run moved to lecun. Machines used: lecun (c48pw1, c256pw1, f16pw05, f32pw05), tsrazer (c128pw1, c128pw2).*
 
 *(Results filled in as runs finish; then Round 2 refines toward the winning region + varies beta.)*
