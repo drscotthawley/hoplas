@@ -57,7 +57,20 @@ Checkpoints: `~/datasets/hoplas_vae/<dataset>_vae_<tag>.pt`.
   does less KL smoothing help?) — both on tsrazer.
 - **Best so far:** CIFAR d256/pw1 (63.4% / 44.9 FID), Fashion d16/pw0.5 (63.0% / 101.4 FID).
 
-### Round 2 (planned, pending Round 1 stragglers)
-- Fashion: d32 @ pw=1.0 and pw=2.0 (test the underweighting hypothesis)
-- CIFAR: d256 @ pw=2.0 (does the pw1→pw2 gain at d128 transfer to d256?)
-- Once c128pw4/c128b05 land: extend whichever axis (pw or beta) is still improving
+### Qualitative finding (Scott, visual inspection of Fashion recon grid, 2026-07-23)
+A plaid shirt reconstructs as **flat uniform gray** — no pattern at all — even though the
+silhouette/class-relevant shape is right. Diagnosis: shallow VGG layers (relu1_2/2_2/3_3) are
+edge/shape-dominant, under-penalizing lost *texture*; MSE actively prefers flat-gray (the
+pixelwise mean over plausible textures). Added `--perceptual-deep` (relu4_3, texture-sensitive)
+to test whether this recovers pattern detail. Not fully captured by k=0/FID alone (a classifier
+may still get "shirt" right without the plaid) — worth an eyeball check on the recon grid too,
+not just the two scalar metrics.
+
+### Round 2 (in progress)
+- **f16pw05deep** — Fashion d16, pw=0.5, `--perceptual-deep` (launched, lecun): does the plaid
+  pattern come back? One-variable test against f16pw05 (same config, shallow-only).
+- **f32pw1** — Fashion d32, pw=1.0 (launched, lecun): tests the pw-underweighting hypothesis
+  for why d32 lost to d16 in Round 1.
+- CIFAR: d256 @ pw=2.0 (does the pw1→pw2 gain at d128 transfer to d256?) — not yet launched
+- Once c128pw4/c128b05 land (tsrazer, ~epoch 23/80 as of last check): extend whichever axis
+  (pw or beta) is still improving
