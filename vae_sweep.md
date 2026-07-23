@@ -66,14 +66,35 @@ to test whether this recovers pattern detail. Not fully captured by k=0/FID alon
 may still get "shirt" right without the plaid) — worth an eyeball check on the recon grid too,
 not just the two scalar metrics.
 
-### Round 2 (in progress)
-- **f16pw05deep** — Fashion d16, pw=0.5, `--perceptual-deep` (launched, lecun): does the plaid
-  pattern come back? One-variable test against f16pw05 (same config, shallow-only).
-- **f32pw1** — Fashion d32, pw=1.0 (launched, lecun): tests the pw-underweighting hypothesis
-  for why d32 lost to d16 in Round 1.
-- **f64pw1** — Fashion d64, pw=1.0 (launched, lecun): does the CIFAR capacity trend (more dims
-  keeps helping) hold for Fashion too, once pw is matched?
-- **c256pw2** — CIFAR d256, pw=2.0 (launched, lecun): combines the two best independent Round 1
-  results (d256 had best FID at pw=1; pw=2 had best k=0 at d128) — the natural next test.
-- Once c128pw4/c128b05 land (tsrazer, ~epoch 23/80 as of last check): extend whichever axis
-  (pw or beta) is still improving
+### Round 2 — results (all finished)
+
+| tag | dataset | latent_dim | pw | beta | k=0 | FID | notes |
+|---|---|---|---|---|---|---|---|
+| f16pw05deep | fashion | 16 | 0.5 | 1.0 | 0.637 | 96.2 | deep VGG: marginal gain over f16pw05 (0.630/101.4) |
+| **f32pw1** | fashion | 32 | 1.0 | 1.0 | **0.879** | **18.6** | mystery solved: d32 just needed higher pw |
+| **f64pw1** | fashion | 64 | 1.0 | 1.0 | **0.897** | **14.4** | best Fashion so far; Scott confirms plaid pattern visibly returns |
+| **c256pw2** | cifar10 | 256 | 2.0 | 1.0 | **0.762** | **31.5** | best CIFAR so far by a wide margin — capacity+pw compound |
+| c128pw4 | cifar10 | 128 | 4.0 | 1.0 | pending | pending | **finished on tsrazer (wandb: val_recon=30.77, val_perc=22.32) but tsrazer is down again — checkpoint stuck there, not lost, just unreachable** |
+| c128b05 | cifar10 | 128 | 1.0 | 0.5 | pending | pending | **finished on tsrazer (wandb: val_recon=26.99, val_perc=24.11) — same as above, checkpoint stranded** |
+
+**Fashion mystery resolved:** the Round 1 "d16 beats d32" result was the pw-underweighting
+artifact, exactly as suspected — at matched pw=1.0, capacity helps monotonically (16→32→64:
+63%→88%→90% k=0), same shape as CIFAR. Confirms Scott's qualitative read: plaid texture
+visibly returns at d64.
+
+**CIFAR: capacity + pw compound.** c256pw2 (76.2%/31.5) beats every single-lever-improved
+config by a wide margin — pushing both axes together, not just one, is the winning direction.
+
+**tsrazer went down again** (unreachable, same signature as the earlier RAM/GPU wedge) partway
+through this round. Both its runs (c128pw4, c128b05) finished training successfully before it
+went down (confirmed via `wandb_search.sh` — no host access needed), so no work was lost, but
+their checkpoints are inaccessible until tsrazer is back up. **Sticking to lecun only for now**
+per Scott's direction. `hsrazer` (the smaller razer machine, distinct from tsrazer) came back
+reachable but a `gpu.sh` probe hit an SSH auth issue (bare hostname without explicit user) —
+not yet used for launches.
+
+### Round 3 (not yet launched — pending direction)
+- CIFAR: does pw keep helping past 2.0 at d256? (c128's pw1→pw2 gain was large; untested at d256)
+- Fashion: does d128 keep the trend going, or hit diminishing returns after 32→64's plateau-ish
+  jump (63→88→90, gains shrinking)?
+- Re-run c128pw4/c128b05 once tsrazer is back (or re-launch on lecun) to get their k=0/FID
