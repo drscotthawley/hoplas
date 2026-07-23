@@ -73,6 +73,7 @@ not just the two scalar metrics.
   for why d32 lost to d16 in Round 1.
 - **f64pw1** — Fashion d64, pw=1.0 (launched, lecun): does the CIFAR capacity trend (more dims
   keeps helping) hold for Fashion too, once pw is matched?
-- CIFAR: d256 @ pw=2.0 (does the pw1→pw2 gain at d128 transfer to d256?) — not yet launched
+- **c256pw2** — CIFAR d256, pw=2.0 (launched, lecun): combines the two best independent Round 1
+  results (d256 had best FID at pw=1; pw=2 had best k=0 at d128) — the natural next test.
 - Once c128pw4/c128b05 land (tsrazer, ~epoch 23/80 as of last check): extend whichever axis
   (pw or beta) is still improving
