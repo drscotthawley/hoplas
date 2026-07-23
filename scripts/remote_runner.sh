@@ -22,7 +22,14 @@ done
 source "$ENV/bin/activate"
 cd "$REPO" || exit 1
 
-n_running()   { ps -eo args | grep -cE '[t]rain_(kge|ops|vae)\.py'; }
+n_running()   {
+    # Count main training procs only, excluding forked DataLoader workers: a worker's parent is
+    # another train proc, a real job's parent is the shell/nohup. (train_vae.py uses num_workers>0,
+    # so a plain `ps|grep -c` counts ~5 procs per job and would blow past --par.)
+    ps -eo pid,ppid,args | awk '
+        /[t]rain_(kge|ops|vae)\.py/ { pid[$1]=1; par[$1]=$2 }
+        END { for (p in pid) if (!(par[p] in pid)) c++; print c+0 }'
+}
 is_running()  {
     case "$1" in
         vae:*) ps -eo args | grep -E '[t]rain_vae\.py' | grep -qF -- "--dataset ${1#vae:}" ;;
