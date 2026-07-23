@@ -80,6 +80,9 @@ import torch.nn as nn
 CIFAR_LATENT_DIM = 128
 _CIFAR_VAE_SPEC = dict(latent_dim=128, base_channels=128, image_size=32, in_channels=3, num_groups=32, attn_heads=4)
 _CIFAR_WEIGHTS_PATH = os.path.join(WEIGHTS_DIR, "cifar_vae.pt")
+# Same conv β-VAE (arch spec read from each checkpoint), trained by scripts/train_vae.py.
+_FASHION_WEIGHTS_PATH   = os.path.join(WEIGHTS_DIR, "fashion_vae.pt")
+_MNIST_OURS_WEIGHTS_PATH = os.path.join(WEIGHTS_DIR, "mnist_vae.pt")   # our trained MNIST VAE (opt-in via "mnist_ours")
 
 
 class _ResBlock2d(nn.Module):
@@ -176,11 +179,22 @@ def _load_cifar_vae(weights_path=None):
 
 
 def load_vae(dataset, device=None):
-    """Load the pretrained VAE for the given dataset ("mnist" or "cifar"), in eval mode."""
+    """Load the pretrained VAE for the given dataset, in eval mode.
+
+    "mnist"      — the borrowed InspoResNetVAE (default; unchanged pipeline)
+    "cifar"      — our conv β-VAE (cifar_vae.pt)
+    "fashion"    — our conv β-VAE (fashion_vae.pt)
+    "mnist_ours" — our conv β-VAE trained on MNIST (mnist_vae.pt); opt-in, does NOT
+                   replace "mnist" so existing results stay on the borrowed VAE.
+    """
     if dataset == "mnist":
         vae = _load_mnist_vae()
     elif dataset == "cifar":
         vae = _load_cifar_vae()
+    elif dataset == "fashion":
+        vae = _load_cifar_vae(_FASHION_WEIGHTS_PATH)
+    elif dataset == "mnist_ours":
+        vae = _load_cifar_vae(_MNIST_OURS_WEIGHTS_PATH)
     else:
         raise ValueError(f"no VAE for dataset: {dataset!r}")
     return vae.to(device or _pick_device()).eval()

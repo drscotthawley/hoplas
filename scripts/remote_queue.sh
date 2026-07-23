@@ -5,7 +5,15 @@
 # given config list as slots free.
 #
 # Usage:
-#   ./scripts/remote_queue.sh <host> [--par N] [--gpu ID] [--poll S] <config_files...>
+#   ./scripts/remote_queue.sh <host> [--par N] [--gpu ID] [--poll S] <items...>
+#
+# Each <item> is one of:
+#   configs/x.cfg (or a glob)  -> train_ops.py  (train_kge.py for kge_* configs)
+#   vae:<dataset>              -> scripts/train_vae.py --dataset <dataset>  (cifar10|fashion|mnist)
+# (This replaces the retired launch.sh / launch_queue.sh: a single config is just a 1-item queue.)
+#
+# Anything after a literal "--" is passed through to every launched job (validated to plain
+# CLI flags only), e.g.:  ./scripts/remote_queue.sh lecun vae:mnist -- --fresh
 #
 # Monitor:  ./scripts/gpu.sh <host> ; ./scripts/results.sh <host> ;
 #           ./scripts/status.sh <host> _remote_queue   (runner log)
@@ -25,9 +33,22 @@ while [[ $# -gt 0 ]]; do
         *) break ;;
     esac
 done
-[[ $# -gt 0 ]] || { echo "No config files given."; exit 1; }
+# Split args on a literal "--": items before it, pass-through flags after it (applied to every
+# launched job; harmless where a script ignores them, e.g. --fresh on cifar/fashion).
+ITEMS=(); EXTRA=(); seen_dashdash=0
+for a in "$@"; do
+    if [[ $seen_dashdash -eq 0 && "$a" == "--" ]]; then seen_dashdash=1; continue; fi
+    if [[ $seen_dashdash -eq 1 ]]; then EXTRA+=("$a"); else ITEMS+=("$a"); fi
+done
+[[ ${#ITEMS[@]} -gt 0 ]] || { echo "No items given."; exit 1; }
+# Safety: pass-through args are re-parsed by the remote shell, so allow only plain CLI
+# flags/values (letters, digits, . _ / = -). Reject anything with spaces or shell metacharacters
+# -- this permits --flag and --flag=value, but never arbitrary commands.
+for a in "${EXTRA[@]}"; do
+    [[ "$a" =~ ^[A-Za-z0-9._/=-]+$ ]] || { echo "Refusing unsafe pass-through arg: '$a'"; exit 1; }
+done
 CONFIGS=()
-for f in "$@"; do CONFIGS+=("$(basename "$f" .cfg)"); done
+for f in "${ITEMS[@]}"; do CONFIGS+=("$(basename "$f" .cfg)"); done
 
 REPO_ARG="${HOPLAS_REMOTE_REPO:-github/hoplas}"
 ENV_ARG="${HOPLAS_REMOTE_ENV:-envs/hoplas}"
@@ -42,8 +63,10 @@ rsync -az --exclude='*.pyc' --exclude='__pycache__' --exclude='.git' \
 rsync -az "${REPO_DIR}/train_ops.py" "${REPO_DIR}/train_kge.py" "${HOST}:${REPO_ARG}/"
 rsync -az "${REPO_DIR}/configs/" "${HOST}:${REPO_ARG}/configs/"
 rsync -az "${REPO_DIR}/scripts/remote_runner.sh" "${HOST}:${REPO_ARG}/remote_runner.sh"
+$SSH "${HOST}" "mkdir -p ${REPO_ARG}/scripts"
+rsync -az "${REPO_DIR}/scripts/train_vae.py" "${HOST}:${REPO_ARG}/scripts/train_vae.py"
 
-$SSH "${HOST}" bash -s -- "$PAR" "$GPU" "$POLL" "$REPO_ARG" "$ENV_ARG" "${CONFIGS[@]}" << 'ENDSSH'
+$SSH "${HOST}" bash -s -- "$PAR" "$GPU" "$POLL" "$REPO_ARG" "$ENV_ARG" "${CONFIGS[@]}" -- "${EXTRA[@]}" << 'ENDSSH'
 PAR="$1"; GPU="$2"; POLL="$3"; RA="$4"; EA="$5"; shift 5
 case "$RA" in /*) REPO="$RA";; *) REPO="$HOME/$RA";; esac
 mkdir -p "$REPO/logs" "$REPO/checkpoints"
