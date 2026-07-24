@@ -93,6 +93,30 @@ per Scott's direction. `hsrazer` (the smaller razer machine, distinct from tsraz
 reachable but a `gpu.sh` probe hit an SSH auth issue (bare hostname without explicit user) —
 not yet used for launches.
 
+## Classifiers for Fashion d32 (paired to the f32pw1 VAE)
+
+Two classifiers, distinct weight files, to set a fair ruler for the operator (op^k) scoring:
+
+| classifier | trained/tested on | test acc | file |
+|---|---|---|---|
+| input | clean Fashion images | **94.7%** | `classifier_fashion_input.pt` |
+| recon (paired to f32pw1) | f32pw1 op⁰ reconstructions | **89.2%** | `classifier_fashion_recon_f32pw1.pt` |
+
+For reference: the *clean* classifier applied to f32pw1 reconstructions scored 87.9% (the k=0
+number from score_recon). So:
+
+- **op⁰ ceiling (recon-adapted ruler) ≈ 89.2%** — the fair denominator for op^k/op⁰. Strong;
+  ample class signal survives d32.
+- **Recon-adaptation gain is small (~1.3 pts: 87.9 → 89.2).** The perceptual d32 VAE is good
+  enough (FID 18.6) that domain shift is minor — a clean classifier already reads its outputs
+  nearly as fairly as a domain-adapted one. **Lesson (revises earlier expectation):** the
+  recon-adapted classifier is *critical for lossy VAEs* (MSE VAEs were near-chance under a clean
+  ruler — pure domain-shift artifact) but only a *small correction for good VAEs*. Its value
+  scales inversely with VAE quality.
+- **Residual 94.7 → 89.2 (~5.5 pts) is genuine VAE info loss, not domain shift** (the recon
+  ruler already corrected for domain) — real class-discriminative texture the d32 bottleneck
+  discards. That's the true cost of the round-trip and what op⁰ actually ceilings at.
+
 ### Round 3 (not yet launched — pending direction)
 - CIFAR: does pw keep helping past 2.0 at d256? (c128's pw1→pw2 gain was large; untested at d256)
 - Fashion: does d128 keep the trend going, or hit diminishing returns after 32→64's plateau-ish
