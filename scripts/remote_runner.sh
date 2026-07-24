@@ -53,10 +53,12 @@ launch() {
         return
     fi
     if [[ "$item" == clf:* ]]; then
-        local ds="${item#clf:}"
+        local rest="${item#clf:}" ds tag logname
+        ds="${rest%%:*}"; tag="${rest#*:}"; [[ "$tag" == "$rest" ]] && tag=""
+        logname="clf_$ds"; [[ -n "$tag" ]] && logname="clf_${ds}_$tag"
         CUDA_VISIBLE_DEVICES="$GPU" nohup python scripts/train_classifier.py --dataset "$ds" "${EXTRA[@]}" \
-            > "$REPO/logs/clf_$ds.log" 2>&1 &
-        echo "[$(date '+%F %T')] launched clf:$ds (train_classifier.py) pid $! -> logs/clf_$ds.log"
+            > "$REPO/logs/$logname.log" 2>&1 &
+        echo "[$(date '+%F %T')] launched clf:$rest (train_classifier.py) pid $! -> logs/$logname.log"
         return
     fi
     if [[ "$item" == recon:* ]]; then

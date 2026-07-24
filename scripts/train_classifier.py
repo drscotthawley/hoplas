@@ -79,12 +79,20 @@ def build_loaders(dataset: str, batch_size: int, num_workers: int):
             DataLoader(test_ds,  shuffle=False, **kw))
 
 
+def _recon(vae, x):
+    """op0 reconstruction: mean-encode -> decode through the frozen VAE, clamped to [0,1]."""
+    mu, _ = vae.encoder(x)
+    return vae.decoder(mu).clamp(0, 1)
+
+
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, vae=None):
     model.eval()
     correct = total = 0
     for x, y in loader:
         x, y = x.to(device), y.to(device)
+        if vae is not None:
+            x = _recon(vae, x)
         pred = model(x).argmax(1)
         correct += (pred == y).sum().item()
         total   += y.size(0)
@@ -108,12 +116,22 @@ def train(args):
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    vae = None
+    if args.vae_path:
+        from hoplas.vae import _load_cifar_vae
+        vae = _load_cifar_vae(os.path.expanduser(args.vae_path)).to(device).eval()
+        for p in vae.parameters():
+            p.requires_grad_(False)
+        print(f"recon-classifier: training on op0 reconstructions through {args.vae_path}")
+
     os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
-    save_path = _ckpt_path(args.dataset)
+    save_path = (os.path.join(CHECKPOINTS_DIR, f"classifier_{args.dataset}_{args.tag}.pt")
+                 if args.tag else _ckpt_path(args.dataset))
     best_acc = 0.0
 
     if not args.no_wandb:
-        wandb.init(project="hoplas-classifier", name=f"{args.dataset}_clf", config=vars(args))
+        wname = f"{args.dataset}_clf" + (f"_{args.tag}" if args.tag else "")
+        wandb.init(project="hoplas-classifier", name=wname, config=vars(args))
 
     try:
         for epoch in range(1, args.epochs + 1):
@@ -122,6 +140,9 @@ def train(args):
             pbar = tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
             for x, y in pbar:
                 x, y = x.to(device), y.to(device)
+                if vae is not None:
+                    with torch.no_grad():
+                        x = _recon(vae, x)
                 optimizer.zero_grad()
                 loss = F.cross_entropy(model(x), y)
                 loss.backward()
@@ -131,7 +152,7 @@ def train(args):
             scheduler.step()
 
             avg_loss = tot_loss / len(train_loader.dataset)
-            acc = evaluate(model, test_loader, device)
+            acc = evaluate(model, test_loader, device, vae)
             marker = ""
             if acc > best_acc:
                 best_acc = acc
@@ -162,6 +183,8 @@ def main():
     p.add_argument("--num-workers",  type=int,   default=4,    help="DataLoader worker processes")
     p.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
     p.add_argument("--no-wandb",     action="store_true",       help="Disable Weights & Biases logging")
+    p.add_argument("--vae-path",     type=str, default=None,     help="If set, train/eval on op0 reconstructions through this VAE (recon-adapted classifier) instead of clean inputs")
+    p.add_argument("--tag",          type=str, default=None,     help="Checkpoint filename suffix: classifier_<dataset>_<tag>.pt (keeps input vs recon classifiers distinct)")
     args = p.parse_args()
     train(args)
 
