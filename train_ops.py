@@ -81,10 +81,38 @@ def evaluate(loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args, max_
     return losses, var_stats, viz, sec_viz
 
 
+@torch.no_grad()
+def ring_metrics(proj, trans_op, dataset, device):
+    """Cheap ring-quality metrics on the npoints canonical (noise-free) line points.
+    Returns (closure_err, planarity):
+      closure_err = mean_i ||op^n(z_i) - z_i|| / ||z_i||  (n=npoints; op composed a full cycle
+                    should return home -- the composability/closure check). Scale-free.
+      planarity   = fraction of variance in the top-2 PCA components of {z_i}  (->1 = clean
+                    planar ring; <1 flags the high-nd 'twist'). Scale-free.
+    line-dataset only (needs canonical points); returns (None, None) otherwise."""
+    if not hasattr(dataset, "line_vals"):
+        return None, None
+    proj.eval(); trans_op.eval()
+    n = dataset.npoints
+    X = torch.zeros(n, dataset.nd, device=device)
+    X[:, 0] = dataset.line_vals.to(device)         # the npoints canonical points (noise-free)
+    Z = proj(X)                                    # (n, pnd) embeddings on the ring
+    W = Z
+    for _ in range(n):                             # apply the operator a full cycle
+        W = trans_op(W)
+    closure_err = ((W - Z).norm(dim=1) / (Z.norm(dim=1) + 1e-9)).mean().item()
+    Zc = Z - Z.mean(0, keepdim=True)
+    var = torch.linalg.svdvals(Zc) ** 2            # PCA variances (singular values^2)
+    planarity = (var[:2].sum() / (var.sum() + 1e-9)).item()
+    proj.train(); trans_op.train()
+    return closure_err, planarity
+
+
 def train(args):
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu") if not args.cpu else torch.device("cpu")
-    _PT_PATHS = {"mnist": "~/datasets/mnist_latents.pt", "cifar": "~/datasets/cifar_latents.pt"}
+    _PT_PATHS = {"mnist": "~/datasets/mnist_latents.pt", "cifar": "~/datasets/cifar_latents.pt",
+                 "fashion": "~/datasets/fashion_latents.pt"}
     if args.dataset == "line":
         dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, target=args.target)
         val_dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, debug=False, len=5000, target=args.target)
@@ -120,6 +148,8 @@ def train(args):
         # multi-head run = dihedral (ring T + reflect I); single head = its own target
         kind = "dihedral" if (args.op_list and len(args.op_list) > 1) else args.target
         project = f"{kind}-{args.dataset}"  # ring-/reflect-/dihedral-mnist (cifar likewise)
+    if args.wandb_project:                    # override to keep sweeps in a clean separate project
+        project = args.wandb_project
     if not args.no_wandb:
         wandb.init(project=project, name=wandb_name, config=vars(args))
         # index every logged metric/media by epoch, so panel sliders (incl. images) read in epochs, not steps
@@ -143,6 +173,16 @@ def train(args):
             for p in m.parameters():
                 p.requires_grad_(False)
         print(f"froze proj+inv_proj from {args.freeze_proj_from} (epoch {ck.get('epoch')}); training op only")
+
+    # Reuse mode ("latent plug-in"): load a trained operator and freeze it, training only a fresh
+    # projector against it -- does an operator learned on one dataset advance a NEW dataset's
+    # classes with only the projector relearned? Mirror of --freeze-proj-from.
+    if args.freeze_op_from:
+        ck = torch.load(os.path.expanduser(args.freeze_op_from), map_location=device)
+        trans_op.load_state_dict(ck["trans_op"])
+        for p in trans_op.parameters():
+            p.requires_grad_(False)
+        print(f"froze trans_op from {args.freeze_op_from} (epoch {ck.get('epoch')}); training projector only (reuse)")
 
     # Secondary op-heads (from --op-list entries 1+): each trains detached on its own target, riding
     # on the geometry the primary (trans_op) shapes, without back-propagating into proj/inv_proj.
@@ -271,10 +311,14 @@ def train(args):
                 (val_loss, val_sim, val_mom, val_sigreg, val_recon), val_vars, viz, sec_viz = evaluate(
                     val_loader, proj, trans_op, inv_proj, sim_fn, device, epoch, args,
                     max_viz=args.max_viz_points, sec_heads=sec_heads, dataset=val_dataset)
-                print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  mom={val_mom:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}  var(xt/y)={val_vars['var_xproj_t']:.4f}/{val_vars['var_yproj']:.4f}")
+                cl_err, planarity = ring_metrics(proj, trans_op, dataset, device)
+                ring_str = (f"  closure={cl_err:.4f}  planarity={planarity:.4f}"
+                            if cl_err is not None else "")
+                print(f"      val  loss={val_loss:.6f}  sim={val_sim:.6f}  mom={val_mom:.6f}  sigreg={val_sigreg:.6f}  recon={val_recon:.6f}  var(xt/y)={val_vars['var_xproj_t']:.4f}/{val_vars['var_yproj']:.4f}{ring_str}")
                 if val_sim < best_val and epoch >= args.warmup:
                     best_val = val_sim
                     torch.save({"epoch": epoch, "val_sim_loss": val_sim, "args": vars(args),
+                                "closure_err": cl_err, "planarity": planarity,
                                 "proj": proj.state_dict(), "inv_proj": inv_proj.state_dict(),
                                 "trans_op": trans_op.state_dict(),
                                 "sec_ops": {h["name"]: h["op"].state_dict() for h in sec_heads}}, ckpt_path)
@@ -292,6 +336,8 @@ def train(args):
                     log.update({"val_loss": val_loss, "val_sim_loss": val_sim,
                                 "val_mom_loss": val_mom, "val_sigreg_loss": val_sigreg,
                                 "val_recon_loss": val_recon, **val_vars})
+                    if cl_err is not None:
+                        log.update({"closure_err": cl_err, "planarity": planarity})
                     if viz is not None:
                         vy, vxt, vyl, vxl = viz
                         # one shared PCA basis over all series so primary + secondary panels line up
@@ -336,6 +382,10 @@ def main():
     p.add_argument("--freeze-proj-from", type=str, default=None,
                    help="Load proj+inv_proj from this checkpoint and freeze them; train only the op "
                         "on the fixed geometry (supervised). Use with --target reflect, lambd=0, lambda_mom=0.")
+    p.add_argument("--freeze-op-from", type=str, default=None,
+                   help="Reuse mode: load trans_op from this checkpoint and freeze it; train only a "
+                        "fresh projector against it (the 'latent plug-in' test -- reuse an operator "
+                        "learned on one dataset for another). op/order/pnd must match the checkpoint.")
     p.add_argument("--inf-every", type=int, default=20,
                    help="Log MNIST inference grids to W&B every N epochs (0 disables; mnist only)")
     p.add_argument("--lambd", type=float, default=0.01,
@@ -361,6 +411,9 @@ def main():
     p.add_argument("--n-hid", type=int, default=32, help="Projector hidden dim")
     p.add_argument("--nd", type=int, default=3, help="Dimension of the space")
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
+    p.add_argument("--wandb-project", default=None,
+                   help="Override the wandb project (default: auto line-<kind>); use a clean "
+                        "separate project for a sweep, e.g. hoplas-ring")
     p.add_argument("--noise", type=float, default=0.01, help="Jitter added to each point")
     p.add_argument("--npoints", type=int, default=12, help="Number of quantized points on the line")
     p.add_argument("--op", choices=["filmr", "filmr_expm", "matop", "matop_clip", "matop2", "ph", "quat", "kquat", "kdualquat"], default="filmr_expm")
