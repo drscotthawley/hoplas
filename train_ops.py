@@ -376,7 +376,7 @@ def main():
     p.add_argument("--batch-size", type=int, default=1024)
     p.add_argument("--config", is_config_file=True, help="path to a config file (keys = dest names with underscores)")
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
-    p.add_argument("--dataset", choices=["line", "mnist", "cifar"], default="line",
+    p.add_argument("--dataset", choices=["line", "mnist", "cifar", "fashion"], default="line",
                    help="line=synthetic ring; mnist/cifar=VAE encodings (nd forced by dataset)")
     p.add_argument("--epochs", type=int, default=1000)
     p.add_argument("--freeze-proj-from", type=str, default=None,
