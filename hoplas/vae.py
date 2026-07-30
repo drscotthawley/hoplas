@@ -81,7 +81,9 @@ CIFAR_LATENT_DIM = 128
 _CIFAR_VAE_SPEC = dict(latent_dim=128, base_channels=128, image_size=32, in_channels=3, num_groups=32, attn_heads=4)
 _CIFAR_WEIGHTS_PATH = os.path.join(WEIGHTS_DIR, "cifar_vae.pt")
 # Same conv β-VAE (arch spec read from each checkpoint), trained by scripts/train_vae.py.
-_FASHION_WEIGHTS_PATH   = os.path.join(WEIGHTS_DIR, "fashion_vae.pt")
+# f32pw1 (nd=32) is the checkpoint that encoded fashion_latents.pt for the operator-reuse
+# experiment; decoding reuse latents with any other fashion VAE would be a latent-space mismatch.
+_FASHION_WEIGHTS_PATH   = os.path.join(WEIGHTS_DIR, "fashion_vae_f32pw1.pt")
 _MNIST_OURS_WEIGHTS_PATH = os.path.join(WEIGHTS_DIR, "mnist_vae.pt")   # our trained MNIST VAE (opt-in via "mnist_ours")
 
 

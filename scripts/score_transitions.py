@@ -29,21 +29,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
-from torchvision.datasets import CIFAR10, MNIST
+from torchvision.datasets import CIFAR10, FashionMNIST, MNIST
 from torchvision.transforms import ToTensor
 from torch.utils.data import DataLoader, Subset
 
 from hoplas.classifier import load_classifier
 from hoplas.inference import apply_operation, load_for_inference, transition_accuracy
-from hoplas.vae import load_vae
+from hoplas.vae import load_vae, _load_cifar_vae
 
 _ROOTS = {"mnist": os.path.expanduser("~/datasets/mnist"),
           "cifar": os.path.expanduser("~/datasets/cifar10"),
-          "cifar10": os.path.expanduser("~/datasets/cifar10")}
+          "cifar10": os.path.expanduser("~/datasets/cifar10"),
+          "fashion": os.path.expanduser("~/datasets/fashion_mnist")}
+_DS_CLASSES = {"mnist": MNIST, "cifar": CIFAR10, "cifar10": CIFAR10, "fashion": FashionMNIST}
 
 
 def _test_loader(dataset, n_samples, batch_size):
-    cls = MNIST if dataset == "mnist" else CIFAR10
+    cls = _DS_CLASSES[dataset]
     ds = cls(root=_ROOTS[dataset], train=False, download=True, transform=ToTensor())
     if n_samples and n_samples < len(ds):
         # deterministic subset for reproducible numbers
@@ -69,8 +71,9 @@ def _build_mu_cache(checkpoint, args):
     """Encode the test set once with the VAE; return (cache, vae, classifier, dataset, device).
     cache = list of (mu_batch, labels_batch) on device."""
     proj, trans_op, inv_proj, device, dataset = load_for_inference(checkpoint, args.device)
-    vae = load_vae(dataset, device=str(device))
-    clf_key = "cifar10" if dataset.startswith("cifar") else "mnist"
+    vae = (_load_cifar_vae(os.path.expanduser(args.vae_path)).to(device).eval()
+           if args.vae_path else load_vae(dataset, device=str(device)))
+    clf_key = "cifar10" if dataset.startswith("cifar") else ("fashion" if dataset == "fashion" else "mnist")
     classifier = load_classifier(clf_key, device=str(device))
     loader = _test_loader(dataset, args.n_samples, args.batch_size)
     cache = []
@@ -337,7 +340,7 @@ def _fit_displacement(C, M, n):
 def confusion_analysis(args):
     proj, trans_op, inv_proj, device, dataset = load_for_inference(args.checkpoint, args.device)
     vae = load_vae(dataset, device=str(device))
-    clf_key = "cifar10" if dataset.startswith("cifar") else "mnist"
+    clf_key = "cifar10" if dataset.startswith("cifar") else ("fashion" if dataset == "fashion" else "mnist")
     classifier = load_classifier(clf_key, device=str(device))
     n = args.n_classes
 
@@ -497,6 +500,10 @@ def main():
     p.add_argument("--no-cache",     action="store_true",    help="ignore cached CSVs and rerun inference")
     p.add_argument("--no-plot",      action="store_true",    help="skip plotting, print tables only")
     p.add_argument("--device",       type=str, default=None, help="cuda/mps/cpu (default: auto)")
+    p.add_argument("--vae-path",     type=str, default=None,
+                   help="override the decode VAE checkpoint (e.g. when checkpoints were trained on latents "
+                        "from a non-default VAE, like a --latents-path run in train_ops.py). default: "
+                        "load_vae(dataset), the dataset's standard VAE.")
     p.add_argument("--confusion-k",  type=int, nargs="+", default=None, metavar="K",
                    help="run operator-vs-judge confusion analysis at these k (skips the transition curve). "
                         "k=0 is auto-included as the deconvolution kernel. e.g. --confusion-k 76 77 78")

@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 780" font-family="Georgia, 'Times New Roman', serif">
+  <title>hoplas architecture: encoder -> disordered latent Z, lift phi to structured ring H (operator T), inverse lift to decoder</title>
+  <defs>
+    <marker id="ah-black" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#1a1a1a"/>
+    </marker>
+    <marker id="ah-green" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#2e9e4f"/>
+    </marker>
+    <marker id="ah-purple" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#6a3fb5"/>
+    </marker>
+    <marker id="ah-red" markerWidth="10" markerHeight="10" refX="7" refY="3.2" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3.2 L0,6.4 Z" fill="#c0202a"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="780" fill="#ffffff"/>
+
+  <!-- ================= main spine: x -> E -> Z -> D -> x-hat ================= -->
+  <!-- input digit 5 -->
+  <rect x="40" y="372" width="116" height="116" fill="#111111"/>
+  <text x="98" y="470" font-size="86" font-weight="700" fill="#f5f5f5" text-anchor="middle">5</text>
+  <text x="98" y="516" font-size="22" fill="#1a1a1a" text-anchor="middle">Input <tspan font-style="italic">x</tspan></text>
+
+  <line x1="158" y1="430" x2="198" y2="430" stroke="#1a1a1a" stroke-width="2.4" marker-end="url(#ah-black)"/>
+
+  <!-- Encoder E (tapering right) -->
+  <path d="M210,376 L210,484 L288,462 L288,398 Z" fill="#dbe8fb" stroke="#2f6fd0" stroke-width="2.4" stroke-linejoin="round"/>
+  <text x="249" y="442" font-size="34" font-style="italic" fill="#2f6fd0" text-anchor="middle">E</text>
+  <text x="249" y="508" font-size="19" fill="#2f6fd0" text-anchor="middle">Encoder</text>
+
+  <line x1="292" y1="430" x2="376" y2="430" stroke="#1a1a1a" stroke-width="2.4" marker-end="url(#ah-black)"/>
+
+  <!-- Latent space Z: disordered overlapping clusters -->
+  <circle cx="490" cy="430" r="112" fill="#ffffff" stroke="#9a9a9a" stroke-width="2" stroke-dasharray="4 5"/>
+  <g fill="#c9c9c9" fill-opacity="0.34" stroke="#8f8f8f" stroke-width="1" stroke-dasharray="1.5 3">
+    <ellipse cx="455" cy="405" rx="44" ry="27" transform="rotate(22 455 405)"/>
+    <ellipse cx="520" cy="398" rx="31" ry="21" transform="rotate(-18 520 398)"/>
+    <ellipse cx="468" cy="458" rx="52" ry="30" transform="rotate(-32 468 458)"/>
+    <ellipse cx="528" cy="452" rx="26" ry="41" transform="rotate(12 528 452)"/>
+    <ellipse cx="492" cy="428" rx="37" ry="23" transform="rotate(48 492 428)"/>
+    <ellipse cx="448" cy="462" rx="23" ry="17" transform="rotate(5 448 462)"/>
+  </g>
+  <g fill="#6f6f6f">
+    <circle cx="430" cy="410" r="1.7"/><circle cx="446" cy="396" r="1.7"/><circle cx="461" cy="421" r="1.7"/>
+    <circle cx="476" cy="401" r="1.7"/><circle cx="491" cy="416" r="1.7"/><circle cx="506" cy="406" r="1.7"/>
+    <circle cx="521" cy="420" r="1.7"/><circle cx="456" cy="436" r="1.7"/><circle cx="471" cy="446" r="1.7"/>
+    <circle cx="486" cy="431" r="1.7"/><circle cx="501" cy="441" r="1.7"/><circle cx="516" cy="436" r="1.7"/>
+    <circle cx="441" cy="456" r="1.7"/><circle cx="461" cy="466" r="1.7"/><circle cx="481" cy="456" r="1.7"/>
+    <circle cx="501" cy="461" r="1.7"/><circle cx="521" cy="456" r="1.7"/><circle cx="451" cy="421" r="1.7"/>
+    <circle cx="536" cy="431" r="1.7"/><circle cx="466" cy="481" r="1.7"/><circle cx="496" cy="476" r="1.7"/>
+    <circle cx="526" cy="470" r="1.7"/><circle cx="511" cy="386" r="1.7"/><circle cx="476" cy="415" r="1.7"/>
+  </g>
+  <!-- working point (hub: lift out, inverse-lift back in, and on to D) -->
+  <circle cx="600" cy="430" r="9" fill="#2f6fd0" stroke="#1a3c78" stroke-width="1.6"/>
+  <text x="490" y="580" font-size="22" fill="#1a1a1a" text-anchor="middle">Latent space <tspan font-style="italic">Z</tspan></text>
+
+  <line x1="611" y1="430" x2="693" y2="430" stroke="#1a1a1a" stroke-width="2.4" marker-end="url(#ah-black)"/>
+
+  <!-- Decoder D (expanding right), symmetric distance from Z as E -->
+  <path d="M700,398 L700,462 L778,484 L778,376 Z" fill="#fce4d0" stroke="#e0762a" stroke-width="2.4" stroke-linejoin="round"/>
+  <text x="739" y="442" font-size="34" font-style="italic" fill="#e0762a" text-anchor="middle">D</text>
+  <text x="739" y="508" font-size="19" fill="#e0762a" text-anchor="middle">Decoder</text>
+
+  <line x1="782" y1="430" x2="906" y2="430" stroke="#1a1a1a" stroke-width="2.4" marker-end="url(#ah-black)"/>
+
+  <!-- output digit 6 -->
+  <rect x="912" y="372" width="116" height="116" fill="#111111"/>
+  <text x="970" y="470" font-size="86" font-weight="700" fill="#f5f5f5" text-anchor="middle">6</text>
+  <text x="970" y="516" font-size="22" fill="#1a1a1a" text-anchor="middle">Output <tspan font-style="italic">x&#770;</tspan></text>
+
+  <!-- ================= lift excursion: Z -> phi -> H (T) -> phi^-1 -> Z ================= -->
+  <!-- phi box -->
+  <rect x="600" y="262" width="60" height="58" rx="11" fill="#e6f4e6" stroke="#2e9e4f" stroke-width="2.4"/>
+  <text x="630" y="300" font-size="30" font-style="italic" fill="#2e8b57" text-anchor="middle">&#966;</text>
+  <text x="630" y="340" font-size="16" fill="#2e8b57" text-anchor="middle">Projector</text>
+  <text x="630" y="357" font-size="14" fill="#2e8b57" text-anchor="middle">(lift map)</text>
+
+  <!-- Z -> phi -->
+  <path d="M556,352 Q582,312 601,300" fill="none" stroke="#2e9e4f" stroke-width="2.6" marker-end="url(#ah-green)"/>
+  <!-- phi -> H (into ring, lower-left) -->
+  <path d="M661,280 Q722,232 772,258" fill="none" stroke="#2e9e4f" stroke-width="2.6" marker-end="url(#ah-green)"/>
+
+  <!-- Projected space H : dashed ring with 10 digit clusters -->
+  <text x="890" y="36" font-size="22" fill="#6a3fb5" text-anchor="middle">Projected space <tspan font-style="italic">H</tspan></text>
+  <circle cx="890" cy="205" r="150" fill="#ffffff" stroke="#6a3fb5" stroke-width="2" stroke-dasharray="5 6"/>
+  <!-- clusters (dotted purple discs) -->
+  <g fill="#7a4fd0" fill-opacity="0.30" stroke="#6a3fb5" stroke-width="1" stroke-dasharray="1.5 3">
+    <circle cx="890" cy="105" r="20"/><circle cx="949" cy="124" r="20"/><circle cx="985" cy="174" r="20"/>
+    <circle cx="985" cy="236" r="20"/><circle cx="949" cy="286" r="20"/><circle cx="890" cy="305" r="20"/>
+    <circle cx="831" cy="286" r="20"/><circle cx="795" cy="236" r="20"/><circle cx="795" cy="174" r="20"/>
+    <circle cx="831" cy="124" r="20"/>
+  </g>
+  <!-- digit labels -->
+  <g font-size="19" fill="#6a3fb5" text-anchor="middle" font-style="italic">
+    <text x="890" y="70">0</text><text x="972" y="96">1</text><text x="1022" y="180">2</text>
+    <text x="1022" y="244">3</text><text x="972" y="326">4</text><text x="884" y="350">5</text>
+    <text x="796" y="326">6</text><text x="748" y="244">7</text><text x="748" y="180">8</text>
+    <text x="796" y="96">9</text>
+  </g>
+  <!-- pre-image (5) and transformed point (6, highlighted) -->
+  <circle cx="890" cy="305" r="6.5" fill="#4a2699"/>
+  <circle cx="831" cy="286" r="7.5" fill="#4a2699"/>
+  <circle cx="831" cy="286" r="12" fill="none" stroke="#2f6fd0" stroke-width="2.4"/>
+  <!-- T : arc 5 -> 6 along the rim -->
+  <path d="M877,300 Q852,278 845,285" fill="none" stroke="#c0202a" stroke-width="3" marker-end="url(#ah-red)"/>
+  <text x="866" y="262" font-size="26" font-style="italic" fill="#c0202a" text-anchor="middle">T</text>
+
+  <!-- phi^-1 box : floated ABOVE the Z->D arrow (so D stays symmetric) -->
+  <rect x="640" y="316" width="58" height="54" rx="11" fill="#e6f4e6" stroke="#2e9e4f" stroke-width="2.4"/>
+  <text x="669" y="350" font-size="24" font-style="italic" fill="#2e8b57" text-anchor="middle">&#966;&#8315;&#185;</text>
+  <text x="712" y="336" font-size="16" fill="#2e8b57">Inverse projector</text>
+  <text x="712" y="353" font-size="14" fill="#2e8b57">(lift map inverse)</text>
+
+  <!-- H -> phi^-1 (dashed purple) -->
+  <path d="M862,352 Q782,352 702,344" fill="none" stroke="#6a3fb5" stroke-width="2.2" stroke-dasharray="6 5" marker-end="url(#ah-purple)"/>
+  <!-- phi^-1 -> working point (dashed green) -->
+  <path d="M640,352 Q612,392 606,420" fill="none" stroke="#2e9e4f" stroke-width="2.2" stroke-dasharray="6 5" marker-end="url(#ah-green)"/>
+
+  <!-- ================= legend ================= -->
+  <rect x="40" y="628" width="1120" height="126" rx="14" fill="#ffffff" stroke="#c9c9c9" stroke-width="1.6"/>
+  <g font-size="15.5" fill="#1a1a1a">
+    <!-- E -->
+    <path d="M70,668 L70,706 L98,700 L98,674 Z" fill="#dbe8fb" stroke="#2f6fd0" stroke-width="1.8"/>
+    <text x="84" y="692" font-size="16" font-style="italic" fill="#2f6fd0" text-anchor="middle">E</text>
+    <text x="110" y="692">Encoder</text>
+    <!-- D -->
+    <path d="M210,674 L210,700 L238,706 L238,668 Z" fill="#fce4d0" stroke="#e0762a" stroke-width="1.8"/>
+    <text x="224" y="692" font-size="16" font-style="italic" fill="#e0762a" text-anchor="middle">D</text>
+    <text x="250" y="692">Decoder</text>
+    <!-- phi -->
+    <rect x="360" y="670" width="34" height="34" rx="8" fill="#e6f4e6" stroke="#2e9e4f" stroke-width="1.8"/>
+    <text x="377" y="693" font-size="18" font-style="italic" fill="#2e8b57" text-anchor="middle">&#966;</text>
+    <text x="404" y="686">Projector</text><text x="404" y="702">(lift map)</text>
+    <!-- phi^-1 -->
+    <rect x="520" y="670" width="36" height="34" rx="8" fill="#e6f4e6" stroke="#2e9e4f" stroke-width="1.8"/>
+    <text x="538" y="692" font-size="15" font-style="italic" fill="#2e8b57" text-anchor="middle">&#966;&#8315;&#185;</text>
+    <text x="566" y="686">Inverse projector</text><text x="566" y="702">(lift map inverse)</text>
+    <!-- Z -->
+    <circle cx="742" cy="687" r="18" fill="none" stroke="#9a9a9a" stroke-width="1.6" stroke-dasharray="3 4"/>
+    <circle cx="736" cy="684" r="4" fill="#c9c9c9"/><circle cx="748" cy="690" r="3" fill="#c9c9c9"/>
+    <text x="772" y="682"><tspan font-style="italic">Z</tspan> latent space</text><text x="772" y="700">(disordered clusters)</text>
+    <!-- H -->
+    <circle cx="946" cy="687" r="18" fill="none" stroke="#6a3fb5" stroke-width="1.6" stroke-dasharray="3 4"/>
+    <text x="976" y="682"><tspan font-style="italic">H</tspan> projected space</text><text x="976" y="700">(organized by class)</text>
+    <!-- T -->
+    <path d="M1100,690 Q1116,676 1128,686" fill="none" stroke="#c0202a" stroke-width="2.4" marker-end="url(#ah-red)"/>
+    <text x="1108" y="672" font-size="15" font-style="italic" fill="#c0202a">T</text>
+    <text x="1092" y="712" font-size="13">learned transform</text>
+  </g>
+</svg>

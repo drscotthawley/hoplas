@@ -18,6 +18,7 @@ mnist_vae.pt is written but NOT wired into load_vae("mnist").
 import argparse
 import os
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 from tqdm import tqdm
@@ -118,8 +119,10 @@ def train(args):
 
     cfg = DATASETS[args.dataset]
     hflip = cfg["hflip"] if args.hflip is None else args.hflip
+    n_classes = 10  # true for cifar10/fashion/mnist, the only DATASETS entries today
     print(f"dataset={args.dataset}  device={device}  latent_dim={args.latent_dim}  "
-          f"base_channels={args.base_channels}  beta={args.beta}  hflip={hflip}")
+          f"base_channels={args.base_channels}  beta={args.beta}  hflip={hflip}  "
+          f"cls_weight={args.cls_weight}")
 
     root = os.path.expanduser(cfg["root"])
     ds_cls = cfg["cls"]
@@ -134,9 +137,15 @@ def train(args):
     model = CIFARVAE(**spec).to(device)
     ema = EMA(model, decay=args.ema) if args.ema > 0 else None
 
+    # Optional auxiliary classifier head on the encoder mean (mu, the deterministic encoding
+    # the ops/ring pipeline consumes downstream). Shapes the latent toward linear class
+    # separability; not EMA'd or reloaded downstream -- purely a training-time regularizer.
+    cls_head = nn.Linear(args.latent_dim, n_classes).to(device) if args.cls_weight > 0 else None
+
     # weight-decay only on >=2D weights (biases/norms excluded)
     split = lambda ps: ([p for p in ps if p.ndim >= 2], [p for p in ps if p.ndim < 2])
-    decay, no_decay = split(list(model.parameters()))
+    all_params = list(model.parameters()) + (list(cls_head.parameters()) if cls_head else [])
+    decay, no_decay = split(all_params)
     optimizer = torch.optim.AdamW([{"params": decay,    "weight_decay": args.weight_decay},
                                    {"params": no_decay, "weight_decay": 0.0}], lr=args.lr)
 
@@ -149,7 +158,10 @@ def train(args):
     best_val_metric = float("inf")
 
     if not args.no_wandb:
-        wandb.init(project="hoplas-vae", name=f"{args.dataset}_beta{args.beta}_d{args.latent_dim}", config=vars(args))
+        run_name = f"{args.dataset}_beta{args.beta}_d{args.latent_dim}"
+        if args.cls_weight > 0:
+            run_name += f"_cls{args.cls_weight}"
+        wandb.init(project="hoplas-vae", name=run_name, config=vars(args))
 
     # fixed val batch for reconstruction logging
     val_imgs_fixed = next(iter(val_loader))[0][:16].to(device)
@@ -159,30 +171,47 @@ def train(args):
             beta = args.beta * min(1.0, epoch / max(1, args.beta_warmup_epochs))  # linear warmup
 
             model.train()
-            tot_loss = tot_recon = tot_kld = 0.0
+            if cls_head: cls_head.train()
+            tot_loss = tot_recon = tot_kld = tot_cls = 0.0
+            correct_cls = 0
             pbar = tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}", leave=False)
-            for x, _ in pbar:
+            for x, labels in pbar:
                 x = x.to(device)
                 optimizer.zero_grad()
                 recon, mu, logvar = model(x)
                 loss, recon_loss, kld = vae_loss(recon, x, mu, logvar, beta, args.free_bits)
                 if perceptual is not None:
                     loss = loss + args.perceptual_weight * perceptual(recon, x)
+                cls_loss = torch.tensor(0.0, device=device)
+                if cls_head is not None:
+                    labels = labels.to(device)
+                    logits = cls_head(mu)
+                    cls_loss = F.cross_entropy(logits, labels)
+                    loss = loss + args.cls_weight * cls_loss
+                    correct_cls += (logits.argmax(1) == labels).sum().item()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                clip_params = list(model.parameters()) + (list(cls_head.parameters()) if cls_head else [])
+                torch.nn.utils.clip_grad_norm_(clip_params, 1.0)
                 optimizer.step()
                 if ema: ema.update(model)
                 bs = x.size(0)
                 tot_loss += loss.item() * bs; tot_recon += recon_loss.item() * bs; tot_kld += kld.item() * bs
-                pbar.set_postfix(recon=f"{recon_loss.item():.3f}", kld=f"{kld.item():.2f}")
+                tot_cls += cls_loss.item() * bs
+                postfix = dict(recon=f"{recon_loss.item():.3f}", kld=f"{kld.item():.2f}")
+                if cls_head: postfix["cls"] = f"{cls_loss.item():.3f}"
+                pbar.set_postfix(**postfix)
             n = len(train_ds)
-            avg_loss, avg_recon, avg_kld = tot_loss/n, tot_recon/n, tot_kld/n
-            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.4f}  recon={avg_recon:.4f}  kld={avg_kld:.4f}  beta={beta:.3f}")
+            avg_loss, avg_recon, avg_kld, avg_cls = tot_loss/n, tot_recon/n, tot_kld/n, tot_cls/n
+            cls_acc = correct_cls / n if cls_head else None
+            cls_str = f"  cls={avg_cls:.4f}  cls_acc={cls_acc:.4f}" if cls_head else ""
+            print(f"epoch {epoch:4d}/{args.epochs}  loss={avg_loss:.4f}  recon={avg_recon:.4f}  kld={avg_kld:.4f}  beta={beta:.3f}{cls_str}")
 
             model.eval()
-            val_tot = val_recon_tot = val_kld_tot = val_perc_tot = 0.0
+            if cls_head: cls_head.eval()
+            val_tot = val_recon_tot = val_kld_tot = val_perc_tot = val_cls_tot = 0.0
+            val_correct_cls = 0
             with torch.no_grad():
-                for x, _ in val_loader:
+                for x, labels in val_loader:
                     x = x.to(device)
                     recon, mu, logvar = model(x)
                     loss, recon_loss, kld = vae_loss(recon, x, mu, logvar, beta, args.free_bits)
@@ -190,24 +219,41 @@ def train(args):
                     val_tot += loss.item() * bs; val_recon_tot += recon_loss.item() * bs; val_kld_tot += kld.item() * bs
                     if perceptual is not None:
                         val_perc_tot += perceptual(recon, x).item() * bs
+                    if cls_head is not None:
+                        labels = labels.to(device)
+                        logits = cls_head(mu)
+                        val_cls_tot += F.cross_entropy(logits, labels).item() * bs
+                        val_correct_cls += (logits.argmax(1) == labels).sum().item()
             nv = len(val_ds)
             val_loss, val_recon, val_kld = val_tot/nv, val_recon_tot/nv, val_kld_tot/nv
             val_perc = val_perc_tot / nv
+            val_cls = val_cls_tot / nv
+            val_cls_acc = val_correct_cls / nv if cls_head else None
             # Select on reconstruction fidelity, including the perceptual term when it's active:
             # pure-MSE selection would prefer the blurrier (lower-MSE) checkpoint and undo the gain.
+            # NOTE: cls loss is deliberately NOT in the selection metric -- it's a training-time
+            # regularizer on the encoder, not a criterion for picking the best reconstruction.
             val_metric = val_recon + args.perceptual_weight * val_perc
-            print(f"       val  loss={val_loss:.4f}  recon={val_recon:.4f}  perc={val_perc:.4f}  kld={val_kld:.4f}")
+            val_cls_str = f"  cls={val_cls:.4f}  cls_acc={val_cls_acc:.4f}" if cls_head else ""
+            print(f"       val  loss={val_loss:.4f}  recon={val_recon:.4f}  perc={val_perc:.4f}  kld={val_kld:.4f}{val_cls_str}")
 
             if val_metric < best_val_metric:
                 best_val_metric = val_metric
                 sd = ema.state_dict() if ema else model.state_dict()
-                torch.save({"spec": spec, "state_dict": sd, "epoch": epoch,
-                            "val_recon": val_recon, "val_perc": val_perc}, save_path)
+                ckpt = {"spec": spec, "state_dict": sd, "epoch": epoch,
+                        "val_recon": val_recon, "val_perc": val_perc}
+                if cls_head is not None:
+                    ckpt["cls_head_state_dict"] = cls_head.state_dict()
+                    ckpt["val_cls_acc"] = val_cls_acc
+                torch.save(ckpt, save_path)
                 print(f"  → saved checkpoint (val_metric={val_metric:.4f})")
 
             if wandb.run is not None:
                 log = {"epoch": epoch, "loss": avg_loss, "recon_loss": avg_recon, "kld": avg_kld, "beta": beta,
                        "val_loss": val_loss, "val_recon": val_recon, "val_perc": val_perc, "val_kld": val_kld}
+                if cls_head is not None:
+                    log.update({"cls_loss": avg_cls, "cls_acc": cls_acc,
+                                 "val_cls_loss": val_cls, "val_cls_acc": val_cls_acc})
                 if epoch % args.img_every == 0 or epoch == 1:
                     with torch.no_grad():
                         recon_fixed, _, _ = model(val_imgs_fixed)
@@ -247,6 +293,9 @@ def main():
     p.add_argument("--lr",                 type=float, default=2e-4)
     p.add_argument("--perceptual-weight",  type=float, default=0.0, help="Weight on VGG16-feature (perceptual) recon loss; 0 = pure MSE")
     p.add_argument("--perceptual-deep",    action="store_true", help="Add a deeper VGG layer (relu4_3) for texture/pattern sensitivity (e.g. plaid), not just edges/shape")
+    p.add_argument("--cls-weight",         type=float, default=0.0, help="Weight on auxiliary classifier CE loss on the encoder mean (mu); 0 disables (default). "
+                                                                          "Trains a linear head jointly to push classes toward linear separability in latent space, "
+                                                                          "for downstream ring/operator experiments. Does not affect checkpoint selection (still recon+perceptual).")
     p.add_argument("--no-wandb",           action="store_true")
     p.add_argument("--save-path",          type=str,   default=None,  help="Override default save path")
     p.add_argument("--seed",               type=int,   default=42)

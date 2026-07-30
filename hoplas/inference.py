@@ -14,7 +14,7 @@ import os
 
 import torch
 import torch.nn.functional as F
-from torchvision.datasets import CIFAR10, MNIST
+from torchvision.datasets import CIFAR10, FashionMNIST, MNIST
 from torchvision.transforms import ToTensor
 from torchvision.utils import make_grid, save_image
 
@@ -25,6 +25,7 @@ from hoplas.vae import load_vae
 
 _MNIST_ROOT = os.path.expanduser("~/datasets/mnist")
 _CIFAR_ROOT = os.path.expanduser("~/datasets/cifar10")
+_FASHION_ROOT = os.path.expanduser("~/datasets/fashion_mnist")
 
 
 def load_for_inference(ckpt_path, device=None):
@@ -49,11 +50,17 @@ def make_class_ordered_images(dataset="mnist", n_per_class=10):
     """Return (100, C, H, W) test images ordered row-major: column c = class c.
 
     make_grid(result, nrow=10) gives one column per class.
-    dataset: "mnist" -> (1,28,28) grayscale; "cifar" -> (3,32,32) RGB.
+    dataset: "mnist"/"fashion" -> (1,28,28) grayscale; "cifar" -> (3,32,32) RGB.
+
+    Class integers use the dataset's native label ordering (for fashion these are the
+    torchvision FashionMNIST labels 0..9 -- T-shirt/trouser/...; semantically arbitrary,
+    but the ring only needs a consistent ordering, not a meaningful one).
     """
     n_classes = 10
     if dataset == "mnist":
         ds = MNIST(root=_MNIST_ROOT, train=False, download=True, transform=ToTensor())
+    elif dataset == "fashion":
+        ds = FashionMNIST(root=_FASHION_ROOT, train=False, download=True, transform=ToTensor())
     elif dataset == "cifar":
         ds = CIFAR10(root=_CIFAR_ROOT, train=False, download=True, transform=ToTensor())
     else:

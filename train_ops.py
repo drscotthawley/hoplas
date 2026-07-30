@@ -33,7 +33,7 @@ def freeze_quaternion(ph_layer):
     ], dtype=ph_layer.a.dtype, device=ph_layer.a.device)
     ph_layer.a.data.copy_(H)
     ph_layer.a.requires_grad_(False)
-from hoplas.vae import load_vae
+from hoplas.vae import load_vae, _load_cifar_vae
 from hoplas.viz import embedding_scatter3d, fit_pca, SECONDARY_SCALES
 
 
@@ -117,7 +117,10 @@ def train(args):
         dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, target=args.target)
         val_dataset = LineDataset(nd=args.nd, npoints=args.npoints, noise=args.noise, debug=False, len=5000, target=args.target)
     else:
-        pt = _PT_PATHS[args.dataset]
+        pt = args.latents_path or _PT_PATHS[args.dataset]
+        if args.latents_path:
+            print(f"using custom latents: {pt}  (pixel-space viz disabled: load_vae('{args.dataset}') "
+                  f"decodes the DEFAULT checkpoint for this dataset, which would mismatch these latents)")
         dataset = EncodingsDataset(pt_path=pt, split="train", target=args.target)
         val_dataset = EncodingsDataset(pt_path=pt, split="test", debug=False, target=args.target)
         args.nd = dataset.nd
@@ -268,9 +271,16 @@ def train(args):
         return loss, comp
 
     # load VAE + cache test grid once for periodic inference viz
+    # (skipped for --latents-path runs UNLESS --vae-path also points at the matching decoder --
+    # otherwise load_vae(dataset) would decode with the DEFAULT checkpoint for that dataset,
+    # which mismatches custom-encoded latents -- garbage images)
     vae, viz_imgs = None, None
-    if args.dataset in ("mnist", "cifar") and args.inf_every > 0 and wandb.run is not None:
-        vae = load_vae(args.dataset, device=str(device))
+    if args.dataset in ("mnist", "cifar", "fashion") and args.inf_every > 0 and wandb.run is not None \
+            and (not args.latents_path or args.vae_path):
+        vae = (_load_cifar_vae(os.path.expanduser(args.vae_path)) if args.vae_path
+               else load_vae(args.dataset, device=str(device)))
+        if args.vae_path:
+            vae = vae.to(device).eval()
         viz_imgs = make_class_ordered_images(dataset=args.dataset).to(device)
 
     os.makedirs("checkpoints", exist_ok=True)
@@ -378,6 +388,13 @@ def main():
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
     p.add_argument("--dataset", choices=["line", "mnist", "cifar", "fashion"], default="line",
                    help="line=synthetic ring; mnist/cifar=VAE encodings (nd forced by dataset)")
+    p.add_argument("--latents-path", type=str, default=None,
+                   help="override the default EncodingsDataset .pt path for --dataset (e.g. latents from a "
+                        "differently-trained VAE, such as a classifier-guided one). Pixel-space wandb viz is "
+                        "disabled unless --vae-path also gives the matching decoder.")
+    p.add_argument("--vae-path", type=str, default=None,
+                   help="decode checkpoint for pixel-space wandb viz, matching whatever VAE produced "
+                        "--latents-path (required together for correct-looking viz grids).")
     p.add_argument("--epochs", type=int, default=1000)
     p.add_argument("--freeze-proj-from", type=str, default=None,
                    help="Load proj+inv_proj from this checkpoint and freeze them; train only the op "
